@@ -1,5 +1,5 @@
 // ============================================================
-//  iirose 点歌（网易云）v0.4.0 —— 网页发布版
+//  iirose 点歌（网易云）v0.5.0 —— 网页发布版
 // ============================================================
 //  单文件、纯前端、零账号、无混淆，可直接阅读审计。
 //
@@ -120,6 +120,7 @@
         name: s.name,
         singer: (s.ar || []).map((a) => a.name).join('/'),
         album: (s.al && s.al.name) || '',
+        cover: (s.al && s.al.picUrl) || '',
       }));
     }
 
@@ -277,20 +278,19 @@
 
     /* ============ 点播流程（搜索路径与链接路径共用） ============ */
     async function dianbo(song) {
-      const [mp3Res, lyrics] = await Promise.all([
+      // 封面：搜索路径无 cover，走详情接口拿真实 al.picUrl（GD-Studio types=pic 返回 id 拼的假 URL，实测 404，弃用）
+      const coverPromise = song.cover
+        ? Promise.resolve(song.cover)
+        : getSongDetail(song.id).then((d) => d.cover).catch(() => '');
+      const [mp3Res, lyrics, cover] = await Promise.all([
         getMp3Url(song.id),
         getLyrics(song.id),
+        coverPromise,
       ]);
       const mp3 = mp3Res.url;
 
       let duration = song.duration;
       if (!duration) duration = mp3Res.size && mp3Res.br ? (mp3Res.size * 8) / (mp3Res.br * 1000) : 0;
-
-      let cover = song.cover || '';
-      if (!cover) {
-        try { cover = (await gdGet({ types: 'pic', id: song.id })).url || ''; }
-        catch (e) { cover = ''; }
-      }
 
       const link = 'https://music.163.com/#/song?id=' + song.id;
       const color = await getDominantColor(cover);
