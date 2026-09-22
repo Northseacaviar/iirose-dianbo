@@ -16,10 +16,15 @@
 https://cdn.jsdelivr.net/gh/Northseacaviar/iirose-dianbo/iirose-dianbo.js
 ```
 
+## 点歌方式（同一个输入框，自动识别）
+
+- **搜歌**：输入歌名或歌手（如「青花瓷」）回车，点结果里的「点播」
+- **链接点播**：粘贴网易云歌曲链接（`https://music.163.com/song?id=xxx`）或纯歌曲 id 回车，点「点播」
+
 ## 说明
 
 - **纯明文、零账号信息**：点播使用「你自己登录的 iirose 账号」，脚本不含任何他人账号/密码
-- **音乐数据**：来自第三方公共 API（GD-Studio），免费、无需登录
+- **音乐数据**：来自第三方公共 API（GD-Studio 直链/歌词 + NeteaseCloudMusicApi 详情），免费、无需登录
 - **更新**：站点每次刷新会重新加载脚本地址，改版后刷新即更新
 
 ## 停用

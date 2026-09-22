@@ -1,5 +1,5 @@
 // ============================================================
-//  iirose 点歌（网易云）v0.1.0 —— 网页发布版
+//  iirose 点歌（网易云）v0.2.0 —— 网页发布版
 // ============================================================
 //  单文件、纯前端、零账号、无混淆，可直接阅读审计。
 //
@@ -10,9 +10,13 @@
 //    4. 输入 js 回车，弹窗粘贴本脚本的【地址】，确定
 //    5. 刷新页面，右下角出现可拖动的 🎵 悬浮球，点击即可搜歌点播
 //
+//  支持两种点歌方式（同一个输入框，自动识别）：
+//    - 歌名/歌手搜索：输入「青花瓷」等关键词 → 列出结果 → 点「点播」
+//    - 网易云链接点播：粘贴 https://music.163.com/song?id=xxx 或纯歌曲 id → 点「点播」
+//
 //  说明：
 //    - 点播使用「使用者自己登录的 iirose 账号」，本脚本不含任何他人账号/密码
-//    - 音乐数据来自第三方公共 API（GD-Studio），免费、无需登录、支持 CORS
+//    - 音乐数据来自第三方公共 API（GD-Studio 直链/歌词 + NeteaseCloudMusicApi 详情），免费、无需登录
 //    - 站点每次刷新会重新加载本地址，改版后朋友刷新即更新
 //
 //  原理：站点把地址存 localStorage extJs，每次页面加载以 <script src> 注入到
@@ -60,7 +64,7 @@
       return '&1' + JSON.stringify(data);
     }
 
-    /* ============ GD-Studio 网易云 API ============ */
+    /* ============ GD-Studio 网易云 API（直链 / 歌词 / 封面 / 搜索） ============ */
     const API_BASE = 'https://music-api.gdstudio.xyz/api.php';
     async function apiGet(params) {
       const qs = new URLSearchParams({ source: 'netease', ...params }).toString();
@@ -79,18 +83,61 @@
       }));
     }
 
-    /* ============ 点播流程 ============ */
+    /* ============ 网易云链接解析 + 歌曲详情 ============ */
+    // 详情接口：NeteaseCloudMusicApi 公共实例（需 https，因为 iirose 是 https 页面，
+    // fetch http:// 会被混合内容阻止）。带 CORS，浏览器可直接 fetch。
+    const DETAIL_APIS = [
+      'https://api.jimsdeng.eu.org',
+    ];
+
+    // 从文本提取歌曲 id：纯数字 或 链接里的 id=xxx
+    function extractSongId(text) {
+      const t = String(text).trim();
+      if (/^\d{5,12}$/.test(t)) return t;
+      const m = t.match(/[?&]id=(\d+)/);
+      return m ? m[1] : null;
+    }
+
+    // 按 id 拿歌曲详情：name / singer / cover / duration
+    async function getSongDetail(id) {
+      for (const base of DETAIL_APIS) {
+        try {
+          const res = await fetch(`${base}/song/detail?ids=${id}`);
+          if (!res.ok) continue;
+          const data = await res.json();
+          const s = data.songs && data.songs[0];
+          if (!s) continue;
+          return {
+            id: String(s.id),
+            name: s.name,
+            singer: (s.ar || []).map((a) => a.name).join('/'),
+            cover: (s.al && s.al.picUrl) || '',
+            duration: (s.dt || 0) / 1000, // 毫秒 → 秒
+          };
+        } catch (e) { /* 试下一个实例 */ }
+      }
+      throw new Error('无法获取歌曲信息（接口失效或链接有误）');
+    }
+
+    /* ============ 点播流程（搜索路径与链接路径共用） ============ */
     async function dianbo(song) {
-      const [urlRes, lyricRes, picRes] = await Promise.all([
+      const [urlRes, lyricRes] = await Promise.all([
         apiGet({ types: 'url', id: song.id, br: '320' }),
         apiGet({ types: 'lyric', id: song.id }),
-        apiGet({ types: 'pic', id: song.id }),
       ]);
       const mp3 = urlRes && urlRes.url;
       if (!mp3) throw new Error('无法获取播放链接（可能无版权或接口限制）');
-      const duration = urlRes.size && urlRes.br ? (urlRes.size * 8) / (urlRes.br * 1000) : 0;
+
+      let duration = song.duration;
+      if (!duration) duration = urlRes.size && urlRes.br ? (urlRes.size * 8) / (urlRes.br * 1000) : 0;
+
+      let cover = song.cover || '';
+      if (!cover) {
+        try { cover = (await apiGet({ types: 'pic', id: song.id })).url || ''; }
+        catch (e) { cover = ''; }
+      }
+
       const lyrics = (lyricRes && lyricRes.lyric) || '';
-      const cover = (picRes && picRes.url) || '';
       const link = 'https://music.163.com/#/song?id=' + song.id;
       const color = 'ec4141';
 
@@ -164,7 +211,7 @@
 
     const searchRow = el('div', { display: 'flex', gap: '6px', padding: '10px 12px' });
     const input = el('input', { flex: '1', background: '#2a2b33', border: '1px solid #444', borderRadius: '6px', color: '#eee', padding: '7px 10px', fontSize: '13px', outline: 'none' });
-    input.placeholder = '歌名 / 歌手';
+    input.placeholder = '歌名 / 歌手，或网易云链接';
     const searchBtn = el('button', { background: '#ec4141', color: '#fff', border: 'none', borderRadius: '6px', padding: '7px 14px', cursor: 'pointer', fontSize: '13px' }, '搜索');
     searchRow.appendChild(input); searchRow.appendChild(searchBtn);
     panel.appendChild(searchRow);
@@ -177,34 +224,54 @@
 
     function setStatus(t, color) { status.textContent = t; status.style.color = color || '#999'; }
 
+    // 渲染一个歌曲结果行（搜索与链接点播共用）
+    function addSongRow(song) {
+      const row = el('div', { padding: '8px 12px', borderTop: '1px solid #2a2b33', display: 'flex', alignItems: 'center', gap: '8px' });
+      const info = el('div', { flex: '1', minWidth: '0' });
+      info.appendChild(el('div', { color: '#eee', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, song.name));
+      const sub = song.singer + (song.album ? ' · ' + song.album : '');
+      info.appendChild(el('div', { color: '#888', fontSize: '11px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, sub));
+      const btn = el('button', { background: '#3a7afe', color: '#fff', border: 'none', borderRadius: '5px', padding: '5px 12px', cursor: 'pointer', fontSize: '12px' }, '点播');
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = '点播中…';
+        try {
+          await dianbo(song);
+          setStatus('已点播：' + song.name + ' - ' + song.singer, '#68b26d');
+        } catch (e) {
+          setStatus('失败：' + e.message, '#ec4141');
+        }
+        btn.disabled = false; btn.textContent = '点播';
+      };
+      row.appendChild(info); row.appendChild(btn);
+      list.appendChild(row);
+    }
+
     async function doSearch() {
       const kw = input.value.trim();
-      if (!kw) { setStatus('请输入歌名', '#ec4141'); return; }
-      setStatus('搜索中…', '#999');
+      if (!kw) { setStatus('请输入歌名或链接', '#ec4141'); return; }
       list.innerHTML = '';
+
+      // —— 网易云链接点播：提取 id 直接拿歌曲 ——
+      const songId = extractSongId(kw);
+      if (songId) {
+        setStatus('解析链接中…', '#999');
+        try {
+          const song = await getSongDetail(songId);
+          setStatus('找到「' + song.name + '」，点「点播」发送到房间', '#999');
+          addSongRow(song);
+        } catch (e) {
+          setStatus('失败：' + e.message, '#ec4141');
+        }
+        return;
+      }
+
+      // —— 关键词搜索 ——
+      setStatus('搜索中…', '#999');
       try {
         const songs = await searchSongs(kw, 8);
         if (!songs.length) { setStatus('无结果', '#ec4141'); return; }
         setStatus('找到 ' + songs.length + ' 首，点「点播」发送到房间', '#999');
-        songs.forEach((s) => {
-          const row = el('div', { padding: '8px 12px', borderTop: '1px solid #2a2b33', display: 'flex', alignItems: 'center', gap: '8px' });
-          const info = el('div', { flex: '1', minWidth: '0' });
-          info.appendChild(el('div', { color: '#eee', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, s.name));
-          info.appendChild(el('div', { color: '#888', fontSize: '11px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, s.singer + (s.album ? ' · ' + s.album : '')));
-          const btn = el('button', { background: '#3a7afe', color: '#fff', border: 'none', borderRadius: '5px', padding: '5px 12px', cursor: 'pointer', fontSize: '12px' }, '点播');
-          btn.onclick = async () => {
-            btn.disabled = true; btn.textContent = '点播中…';
-            try {
-              await dianbo(s);
-              setStatus('已点播：' + s.name + ' - ' + s.singer, '#68b26d');
-            } catch (e) {
-              setStatus('失败：' + e.message, '#ec4141');
-            }
-            btn.disabled = false; btn.textContent = '点播';
-          };
-          row.appendChild(info); row.appendChild(btn);
-          list.appendChild(row);
-        });
+        songs.forEach(addSongRow);
       } catch (e) {
         setStatus('搜索失败：' + e.message, '#ec4141');
       }
