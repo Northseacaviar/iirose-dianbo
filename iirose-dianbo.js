@@ -1,5 +1,5 @@
 // ============================================================
-//  iirose 点歌（网易云）v0.2.0 —— 网页发布版
+//  iirose 点歌（网易云）v0.3.0 —— 网页发布版
 // ============================================================
 //  单文件、纯前端、零账号、无混淆，可直接阅读审计。
 //
@@ -16,7 +16,8 @@
 //
 //  说明：
 //    - 点播使用「使用者自己登录的 iirose 账号」，本脚本不含任何他人账号/密码
-//    - 音乐数据来自第三方公共 API（GD-Studio 直链/歌词 + NeteaseCloudMusicApi 详情），免费、无需登录
+//    - 音乐数据多源 fallback：直链/歌词/搜索走 GD-Studio + NeteaseCloudMusicApi 公共实例，
+//      详情走 NeteaseCloudMusicApi 多实例；任一源失效自动切换下一个
 //    - 站点每次刷新会重新加载本地址，改版后朋友刷新即更新
 //
 //  原理：站点把地址存 localStorage extJs，每次页面加载以 <script src> 注入到
@@ -64,32 +65,65 @@
       return '&1' + JSON.stringify(data);
     }
 
-    /* ============ GD-Studio 网易云 API（直链 / 歌词 / 封面 / 搜索） ============ */
-    const API_BASE = 'https://music-api.gdstudio.xyz/api.php';
-    async function apiGet(params) {
+    /* ============ 多源数据层（每个操作多源 fallback） ============ */
+    // 源清单：
+    //  - GD-Studio：直链（能解 VIP）、歌词、封面、搜索（types=search/url/lyric/pic）
+    //  - NeteaseCloudMusicApi 公共实例：详情 /song/detail、歌词 /lyric、搜索 /search、
+    //    非 VIP 直链 /song/url（VIP 歌 url=null，解不了）。必须 https（https 页面 fetch http 会被混合内容阻止）。
+    const GD_API = 'https://music-api.gdstudio.xyz/api.php';
+    const NCM_APIS = [
+      'https://api.jimsdeng.eu.org',
+      'https://netease-cloud-music-api-delta.vercel.app',
+    ];
+
+    // 依次尝试多个 URL，返回第一个 res.ok 的响应
+    async function fetchAny(urls) {
+      let lastErr = null;
+      for (const u of urls) {
+        try {
+          const res = await fetch(u, { signal: AbortSignal.timeout(10000) });
+          if (res.ok) return res;
+          lastErr = new Error('HTTP ' + res.status);
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('接口不可用');
+    }
+
+    // GD-Studio 通用请求
+    async function gdGet(params) {
       const qs = new URLSearchParams({ source: 'netease', ...params }).toString();
-      const res = await fetch(`${API_BASE}?${qs}`);
-      if (!res.ok) throw new Error('GD-Studio API HTTP ' + res.status);
+      const res = await fetch(`${GD_API}?${qs}`, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error('GD-Studio HTTP ' + res.status);
       return res.json();
     }
+
+    // 搜索：GD-Studio 优先，NeteaseCloudMusicApi /search 兜底
     async function searchSongs(keyword, count) {
-      const list = await apiGet({ types: 'search', name: keyword, count: String(count || 10) });
-      if (!Array.isArray(list)) throw new Error('搜索返回格式异常');
-      return list.map((s) => ({
+      count = count || 8;
+      try {
+        const list = await gdGet({ types: 'search', name: keyword, count: String(count) });
+        if (Array.isArray(list) && list.length) {
+          return list.map((s) => ({
+            id: String(s.id),
+            name: s.name,
+            singer: Array.isArray(s.artist) ? s.artist.join('/') : (s.artist || ''),
+            album: s.album || '',
+          }));
+        }
+      } catch (e) { /* 落到 NCM */ }
+      const res = await fetchAny(NCM_APIS.map((b) => `${b}/search?keywords=${encodeURIComponent(keyword)}&limit=${count}`));
+      const d = await res.json();
+      const songs = d.result && d.result.songs;
+      if (!Array.isArray(songs)) throw new Error('搜索返回格式异常');
+      return songs.map((s) => ({
         id: String(s.id),
         name: s.name,
-        singer: Array.isArray(s.artist) ? s.artist.join('/') : (s.artist || ''),
-        album: s.album || '',
+        singer: (s.ar || []).map((a) => a.name).join('/'),
+        album: (s.al && s.al.name) || '',
       }));
     }
 
     /* ============ 网易云链接解析 + 歌曲详情 ============ */
-    // 详情接口：NeteaseCloudMusicApi 公共实例（需 https，因为 iirose 是 https 页面，
-    // fetch http:// 会被混合内容阻止）。带 CORS，浏览器可直接 fetch。
-    const DETAIL_APIS = [
-      'https://api.jimsdeng.eu.org',
-    ];
-
     // 从文本提取歌曲 id：纯数字 或 链接里的 id=xxx
     function extractSongId(text) {
       const t = String(text).trim();
@@ -100,44 +134,63 @@
 
     // 按 id 拿歌曲详情：name / singer / cover / duration
     async function getSongDetail(id) {
-      for (const base of DETAIL_APIS) {
-        try {
-          const res = await fetch(`${base}/song/detail?ids=${id}`);
-          if (!res.ok) continue;
-          const data = await res.json();
-          const s = data.songs && data.songs[0];
-          if (!s) continue;
-          return {
-            id: String(s.id),
-            name: s.name,
-            singer: (s.ar || []).map((a) => a.name).join('/'),
-            cover: (s.al && s.al.picUrl) || '',
-            duration: (s.dt || 0) / 1000, // 毫秒 → 秒
-          };
-        } catch (e) { /* 试下一个实例 */ }
-      }
-      throw new Error('无法获取歌曲信息（接口失效或链接有误）');
+      const res = await fetchAny(NCM_APIS.map((b) => `${b}/song/detail?ids=${id}`));
+      const data = await res.json();
+      const s = data.songs && data.songs[0];
+      if (!s) throw new Error('无法获取歌曲信息（接口失效或链接有误）');
+      return {
+        id: String(s.id),
+        name: s.name,
+        singer: (s.ar || []).map((a) => a.name).join('/'),
+        cover: (s.al && s.al.picUrl) || '',
+        duration: (s.dt || 0) / 1000, // 毫秒 → 秒
+      };
+    }
+
+    // 直链：GD-Studio 优先（解 VIP），NeteaseCloudMusicApi /song/url 兜底（仅免费歌）
+    async function getMp3Url(id) {
+      try {
+        const r = await gdGet({ types: 'url', id, br: '320' });
+        if (r && r.url) return { url: r.url, size: r.size, br: r.br };
+      } catch (e) { /* 落到 NCM */ }
+      const res = await fetchAny(NCM_APIS.map((b) => `${b}/song/url?id=${id}&br=320`));
+      const d = await res.json();
+      const it = d.data && d.data[0];
+      if (it && it.url) return { url: it.url, size: it.size, br: it.br };
+      throw new Error('无法获取播放链接（可能无版权或接口限制）');
+    }
+
+    // 歌词：GD-Studio 优先，NeteaseCloudMusicApi /lyric 兜底
+    async function getLyrics(id) {
+      try {
+        const r = await gdGet({ types: 'lyric', id });
+        if (r && r.lyric) return r.lyric;
+      } catch (e) { /* 落到 NCM */ }
+      try {
+        const res = await fetchAny(NCM_APIS.map((b) => `${b}/lyric?id=${id}`));
+        const d = await res.json();
+        if (d.lrc && d.lrc.lyric) return d.lrc.lyric;
+      } catch (e) { /* 忽略，歌词可为空 */ }
+      return '';
     }
 
     /* ============ 点播流程（搜索路径与链接路径共用） ============ */
     async function dianbo(song) {
-      const [urlRes, lyricRes] = await Promise.all([
-        apiGet({ types: 'url', id: song.id, br: '320' }),
-        apiGet({ types: 'lyric', id: song.id }),
+      const [mp3Res, lyrics] = await Promise.all([
+        getMp3Url(song.id),
+        getLyrics(song.id),
       ]);
-      const mp3 = urlRes && urlRes.url;
-      if (!mp3) throw new Error('无法获取播放链接（可能无版权或接口限制）');
+      const mp3 = mp3Res.url;
 
       let duration = song.duration;
-      if (!duration) duration = urlRes.size && urlRes.br ? (urlRes.size * 8) / (urlRes.br * 1000) : 0;
+      if (!duration) duration = mp3Res.size && mp3Res.br ? (mp3Res.size * 8) / (mp3Res.br * 1000) : 0;
 
       let cover = song.cover || '';
       if (!cover) {
-        try { cover = (await apiGet({ types: 'pic', id: song.id })).url || ''; }
+        try { cover = (await gdGet({ types: 'pic', id: song.id })).url || ''; }
         catch (e) { cover = ''; }
       }
 
-      const lyrics = (lyricRes && lyricRes.lyric) || '';
       const link = 'https://music.163.com/#/song?id=' + song.id;
       const color = 'ec4141';
 
