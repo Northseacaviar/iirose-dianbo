@@ -1,5 +1,5 @@
 // ============================================================
-//  iirose 点歌（网易云）v0.3.0 —— 网页发布版
+//  iirose 点歌（网易云）v0.4.0 —— 网页发布版
 // ============================================================
 //  单文件、纯前端、零账号、无混淆，可直接阅读审计。
 //
@@ -174,6 +174,107 @@
       return '';
     }
 
+    // 颜色美化：深色提亮、浅色压暗、偏灰保底饱和，保证卡片色可读且不刺眼
+    function beautifyColor(hex) {
+      const r0 = parseInt(hex.slice(0, 2), 16), g0 = parseInt(hex.slice(2, 4), 16), b0 = parseInt(hex.slice(4, 6), 16);
+      const r = r0 / 255, g = g0 / 255, b = b0 / 255;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      let h = 0, s = 0, l = (mx + mn) / 2;
+      if (mx !== mn) {
+        const d = mx - mn;
+        s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+        if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+        else if (mx === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h /= 6;
+      }
+      if (l < 0.32) l = 0.32;              // 深色提亮，避免纯黑
+      if (l > 0.62) l = 0.62;              // 浅色压暗，避免刺眼
+      if (s > 0.06 && s < 0.20) s = 0.20;  // 偏灰保底饱和
+      const hue2rgb = (p, q, t) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1 / 6) return p + (q - p) * 6 * t;
+        if (t < 1 / 2) return q;
+        if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+        return p;
+      };
+      let rr, gg, bb;
+      if (s === 0) { rr = gg = bb = l * 255; }
+      else {
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        rr = hue2rgb(p, q, h + 1 / 3) * 255;
+        gg = hue2rgb(p, q, h) * 255;
+        bb = hue2rgb(p, q, h - 1 / 3) * 255;
+      }
+      return ((1 << 24) + (Math.round(rr) << 16) + (Math.round(gg) << 8) + Math.round(bb)).toString(16).slice(1);
+    }
+
+    // 从封面图提取主色（卡片背景色适配封面）。封面域 music.126.net 已确认返回 CORS *，
+    // 故 crossOrigin 读取像素不会被 canvas 污染。
+    async function getDominantColor(coverUrl) {
+      const fallback = 'ec4141';
+      if (!coverUrl) return fallback;
+      try {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = () => reject(new Error('封面加载失败'));
+          img.src = coverUrl;
+        });
+        const size = 40;
+        const canvas = document.createElement('canvas');
+        canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, size, size);
+        const px = ctx.getImageData(0, 0, size, size).data;
+
+        // 收集所有不透明像素
+        const pixels = [];
+        let sumR = 0, sumG = 0, sumB = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          const r = px[i], g = px[i + 1], b = px[i + 2], a = px[i + 3];
+          if (a < 128) continue;
+          pixels.push([r, g, b]);
+          sumR += r; sumG += g; sumB += b;
+        }
+        if (!pixels.length) return fallback;
+
+        const quantize = (list, minMax, maxMin, minSat) => {
+          const buckets = new Map();
+          for (const [r, g, b] of list) {
+            const max = Math.max(r, g, b), min = Math.min(r, g, b);
+            if (max < minMax || min > maxMin) continue;
+            if (max - min < minSat) continue;
+            const key = (r >> 4) + ',' + (g >> 4) + ',' + (b >> 4);
+            buckets.set(key, (buckets.get(key) || 0) + 1);
+          }
+          if (!buckets.size) return null;
+          let bestKey = null, bestCount = 0;
+          for (const [k, c] of buckets) {
+            if (c > bestCount) { bestCount = c; bestKey = k; }
+          }
+          const [rr, gg, bb] = bestKey.split(',').map((v) => (Number(v) << 4) | 8);
+          return ((1 << 24) + (rr << 16) + (gg << 8) + bb).toString(16).slice(1);
+        };
+
+        // 三级降级：鲜艳主色 → 任意主色(只滤极端明暗) → 平均色
+        let hex = quantize(pixels, 40, 235, 25);
+        if (!hex) hex = quantize(pixels, 15, 250, 0);
+        if (!hex) {
+          const rr = Math.round(sumR / pixels.length);
+          const gg = Math.round(sumG / pixels.length);
+          const bb = Math.round(sumB / pixels.length);
+          hex = ((1 << 24) + (rr << 16) + (gg << 8) + bb).toString(16).slice(1);
+        }
+        return beautifyColor(hex);
+      } catch (e) {
+        return fallback;
+      }
+    }
+
     /* ============ 点播流程（搜索路径与链接路径共用） ============ */
     async function dianbo(song) {
       const [mp3Res, lyrics] = await Promise.all([
@@ -192,7 +293,7 @@
       }
 
       const link = 'https://music.163.com/#/song?id=' + song.id;
-      const color = 'ec4141';
+      const color = await getDominantColor(cover);
 
       const sock = getSocket();
       sock.send(buildMediaCard(song.name, song.singer, cover, color, 320));
