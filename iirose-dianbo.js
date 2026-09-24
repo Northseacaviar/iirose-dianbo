@@ -46,19 +46,20 @@
       const c = String(color || '').replace('#', '');
       return /^[0-9a-fA-F]{6}$/.test(c) ? c : 'ec4141';
     }
-    function buildMediaCard(name, singer, cover, color, bitrate) {
+    function buildMediaCard(name, singer, cover, color, bitrate, type) {
       const c = normalizeColor(color);
-      const m = `m__4${NETEASE_TYPE}>${encodeHTML(name)}>${encodeHTML(singer)}>${cover}>${c}>${bitrate}`;
+      const t = type || NETEASE_TYPE;
+      const m = `m__4${t}>${encodeHTML(name)}>${encodeHTML(singer)}>${cover}>${c}>${bitrate}`;
       return JSON.stringify({ m: m, mc: c, i: String(Date.now()) });
     }
-    function buildMediaEvent(url, duration, cover, name, singer, link, lyrics) {
+    function buildMediaEvent(url, duration, cover, name, singer, link, lyrics, type) {
       const data = {
         s: stripScheme(url),
         d: duration,
         c: stripScheme(cover),
         n: name,
         r: singer,
-        b: NETEASE_TYPE,
+        b: type || NETEASE_TYPE,
         o: stripScheme(link),
         l: lyrics || '',
       };
@@ -431,8 +432,10 @@
 
     // 从封面图提取主色（卡片背景色适配封面）。封面域 music.126.net 已确认返回 CORS *，
     // 故 crossOrigin 读取像素不会被 canvas 污染。
-    async function getDominantColor(coverUrl) {
-      const fallback = 'ec4141';
+    // 注意：QQ 音乐的封面域 y.qq.com 实测【没有】Access-Control-Allow-Origin，
+    // crossOrigin 加载必然失败 → 走 catch，由调用方传的兜底色决定卡片颜色。
+    async function getDominantColor(coverUrl, fallbackHex) {
+      const fallback = normalizeColor(fallbackHex || 'ec4141');
       if (!coverUrl) return fallback;
       try {
         const img = new Image();
@@ -494,7 +497,34 @@
     }
 
     /* ============ 点播流程（搜索路径与链接路径共用） ============ */
+    // 入口：按 source 分流。网易云走原路径；QQ 走「只播完整版，拿不到就回退网易云同名单曲」。
     async function dianbo(song) {
+      if ((song.source || 'netease') !== 'qq') return sendNetease(song);
+
+      let reason = '';
+      try {
+        const got = await qqGetUrl(song.mid, song.duration);
+        if (got.complete) return sendQq(song, got);
+        reason = '只给 ' + Math.round(song.duration || 0) + ' 秒试听片段';
+      } catch (e) {
+        reason = e.message || '拿不到播放链接';
+      }
+
+      // 回退：网易云找同名单曲。
+      // QQ 会员歌在网易云往往同样没有版权 —— 找不到就如实报错，绝不能让用户点了没反应
+      const alt = await findNeteaseSame(song);
+      if (!alt) throw new Error('QQ 音乐「' + song.name + '」' + reason + '，网易云也没有同名单曲');
+      // 提示里报清回退到了谁的版本 —— 同名歌很可能是翻唱，用户要能一眼看出
+      const altNote = '网易云「' + alt.name + (alt.singer ? ' - ' + alt.singer : '') + '」';
+      try {
+        return await sendNetease(alt, 'QQ 音乐' + reason + '，已自动改用' + altNote);
+      } catch (e) {
+        throw new Error('QQ 音乐' + reason + '；改用' + altNote + '也失败（' + e.message + '）');
+      }
+    }
+
+    // 网易云点播（原路径）
+    async function sendNetease(song, note) {
       // 封面：搜索路径无 cover，走详情接口拿真实 al.picUrl（GD-Studio types=pic 返回 id 拼的假 URL，实测 404，弃用）
       const coverPromise = song.cover
         ? Promise.resolve(song.cover)
@@ -513,8 +543,51 @@
       const color = await getDominantColor(cover);
 
       const sock = getSocket();
-      sock.send(buildMediaCard(song.name, song.singer, cover, color, 320));
-      sock.send(buildMediaEvent(mp3, duration, cover, song.name, song.singer, link, lyrics));
+      sock.send(buildMediaCard(song.name, song.singer, cover, color, 320, NETEASE_TYPE));
+      sock.send(buildMediaEvent(mp3, duration, cover, song.name, song.singer, link, lyrics, NETEASE_TYPE));
+      return { note: note || '', source: 'netease', name: song.name, singer: song.singer };
+    }
+
+    // QQ 音乐点播（仅在拿到完整直链时调用）
+    async function sendQq(song, got) {
+      const cover = song.cover || '';
+      const lyrics = song.id ? await qqLyrics(song.id).catch(() => '') : '';
+      // QQ 封面域无 CORS，取色一定失败 → 兜底用腾讯绿，避免卡片退成网易云红
+      const color = await getDominantColor(cover, '31c27c');
+      let duration = song.duration;
+      if (!duration) duration = got.size && got.kbps ? (got.size * 8) / (got.kbps * 1000) : 0;
+      const link = song.link || ('https://y.qq.com/n/ryqq/songDetail/' + song.mid);
+      const br = Math.round(got.kbps || 128);
+
+      const sock = getSocket();
+      sock.send(buildMediaCard(song.name, song.singer, cover, color, br, QQ_TYPE));
+      sock.send(buildMediaEvent(got.url, Math.round(duration), cover, song.name, song.singer, link, lyrics, QQ_TYPE));
+      return { note: '', source: 'qq', name: song.name, singer: song.singer };
+    }
+
+    // 网易云同名单曲查找（QQ 回退用）：歌名归一化后匹配，优先歌手也对得上的版本（避免点了周杰伦却回退成翻唱）
+    function normName(s) {
+      return String(s || '').replace(/[\s\-_()（）【】\[\]·.,，、!！?？'"]/g, '').toLowerCase();
+    }
+    async function findNeteaseSame(song) {
+      const key = normName(song.name);
+      const singerKey = normName(song.singer);
+      if (!key) return null;
+      let list = [];
+      try { list = await searchSongs((song.name + ' ' + (song.singer || '')).trim(), 5); } catch (e) { return null; }
+      const same = (list || []).filter((x) => {
+        const n = normName(x.name);
+        return n === key || n.indexOf(key) >= 0 || key.indexOf(n) >= 0;
+      });
+      if (!same.length) return null;
+      if (singerKey) {
+        const sameSinger = same.find((x) => {
+          const s = normName(x.singer);
+          return s && (s === singerKey || s.indexOf(singerKey) >= 0 || singerKey.indexOf(s) >= 0);
+        });
+        if (sameSinger) return sameSinger;
+      }
+      return same[0];
     }
 
     function getSocket() {
@@ -574,7 +647,7 @@
       padding: '10px 12px', color: '#fff', fontSize: '14px', fontWeight: '700', borderBottom: '1px solid #333',
       display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'grab', userSelect: 'none',
     });
-    title.appendChild(el('span', null, '🎵 点歌（网易云）'));
+    title.appendChild(el('span', null, '🎵 点歌（网易云 + QQ 音乐）'));
     const closeBtn = el('span', { cursor: 'pointer', color: '#888', fontSize: '16px' }, '×');
     closeBtn.onclick = () => { panel.style.display = 'none'; };
     title.appendChild(closeBtn);
@@ -582,7 +655,7 @@
 
     const searchRow = el('div', { display: 'flex', gap: '6px', padding: '10px 12px' });
     const input = el('input', { flex: '1', background: '#2a2b33', border: '1px solid #444', borderRadius: '6px', color: '#eee', padding: '7px 10px', fontSize: '13px', outline: 'none' });
-    input.placeholder = '歌名 / 歌手，或网易云链接';
+    input.placeholder = '歌名 / 歌手，或网易云 / QQ 音乐链接';
     const searchBtn = el('button', { background: '#ec4141', color: '#fff', border: 'none', borderRadius: '6px', padding: '7px 14px', cursor: 'pointer', fontSize: '13px' }, '搜索');
     searchRow.appendChild(input); searchRow.appendChild(searchBtn);
     panel.appendChild(searchRow);
@@ -595,19 +668,34 @@
 
     function setStatus(t, color) { status.textContent = t; status.style.color = color || '#999'; }
 
+    function fmtDur(sec) {
+      const s = Math.round(sec || 0);
+      if (!s) return '';
+      return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+
     // 渲染一个歌曲结果行（搜索与链接点播共用）
     function addSongRow(song) {
+      const isQq = (song.source || 'netease') === 'qq';
       const row = el('div', { padding: '8px 12px', borderTop: '1px solid #2a2b33', display: 'flex', alignItems: 'center', gap: '8px' });
       const info = el('div', { flex: '1', minWidth: '0' });
-      info.appendChild(el('div', { color: '#eee', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, song.name));
-      const sub = song.singer + (song.album ? ' · ' + song.album : '');
+      const line1 = el('div', { display: 'flex', alignItems: 'center', gap: '5px' });
+      line1.appendChild(el('span', {
+        fontSize: '10px', lineHeight: '15px', padding: '0 4px', borderRadius: '3px', color: '#fff', flexShrink: '0',
+        background: isQq ? '#31c27c' : '#ec4141',
+      }, isQq ? 'QQ' : '网易'));
+      line1.appendChild(el('span', { color: '#eee', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, song.name));
+      info.appendChild(line1);
+      const sub = song.singer
+        + (song.album ? ' · ' + song.album : '')
+        + (song.duration ? ' · ' + fmtDur(song.duration) : '');
       info.appendChild(el('div', { color: '#888', fontSize: '11px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, sub));
       const btn = el('button', { background: '#3a7afe', color: '#fff', border: 'none', borderRadius: '5px', padding: '5px 12px', cursor: 'pointer', fontSize: '12px' }, '点播');
       btn.onclick = async () => {
         btn.disabled = true; btn.textContent = '点播中…';
         try {
-          await dianbo(song);
-          setStatus('已点播：' + song.name + ' - ' + song.singer, '#68b26d');
+          const r = await dianbo(song);
+          setStatus((r && r.note) ? r.note : '已点播：' + song.name + ' - ' + song.singer, '#68b26d');
         } catch (e) {
           setStatus('失败：' + e.message, '#ec4141');
         }
@@ -621,6 +709,21 @@
       const kw = input.value.trim();
       if (!kw) { setStatus('请输入歌名或链接', '#ec4141'); return; }
       list.innerHTML = '';
+
+      // —— QQ 音乐链接点播 ——
+      // 必须放在网易云规则之前：QQ 官方分享链接里的 ?songmid= 会被别的规则误抓
+      const qqMid = qqExtractMid(kw);
+      if (qqMid) {
+        setStatus('解析 QQ 音乐链接…', '#999');
+        try {
+          const song = await qqDetail(qqMid);
+          setStatus('找到「' + song.name + '」（QQ 音乐），点「点播」发送到房间', '#999');
+          addSongRow(song);
+        } catch (e) {
+          setStatus('失败：' + e.message, '#ec4141');
+        }
+        return;
+      }
 
       // —— 网易云链接点播：提取 id 直接拿歌曲 ——
       const songId = extractSongId(kw);
@@ -636,16 +739,16 @@
         return;
       }
 
-      // —— 关键词搜索 ——
-      setStatus('搜索中…', '#999');
-      try {
-        const songs = await searchSongs(kw, 8);
-        if (!songs.length) { setStatus('无结果', '#ec4141'); return; }
-        setStatus('找到 ' + songs.length + ' 首，点「点播」发送到房间', '#999');
-        songs.forEach(addSongRow);
-      } catch (e) {
-        setStatus('搜索失败：' + e.message, '#ec4141');
-      }
+      // —— 关键词搜索：两个源并行，任一挂掉不影响另一个 ——
+      setStatus('搜索中…（网易云 + QQ 音乐）', '#999');
+      const [ncm, qq] = await Promise.all([
+        searchSongs(kw, 6).catch(() => []),
+        qqSearch(kw, 6).catch(() => []),
+      ]);
+      const songs = ncm.concat(qq);
+      if (!songs.length) { setStatus('无结果（两个源都没搜到）', '#ec4141'); return; }
+      setStatus('找到 ' + songs.length + ' 首（网易云 ' + ncm.length + ' / QQ ' + qq.length + '），点「点播」发送到房间', '#999');
+      songs.forEach(addSongRow);
     }
     searchBtn.onclick = doSearch;
     input.onkeydown = (e) => { if (e.key === 'Enter') doSearch(); };
