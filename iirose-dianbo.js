@@ -36,6 +36,11 @@
     if (window.__IIROSE_DIANBO__) return;
     window.__IIROSE_DIANBO__ = true;
 
+    // 版本号：控制台与悬浮球上可见，用来确认「页面里到底加载的是哪一版」
+    // （jsdelivr 有 CDN/浏览器双层缓存，改了代码朋友那边不一定马上换新版）
+    const VERSION = '0.6.0';
+    window.__IIROSE_DIANBO_VERSION__ = VERSION;
+
     /* ============ 点播消息拼装（协议见 iirose-docs api_media.md） ============ */
     // #region PROTOCOL
     const NETEASE_TYPE = '@0';   // QQ 音乐的类型码是 @2（见下方 QQ 数据层），新增音源必须显式传码
@@ -662,7 +667,7 @@
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       userSelect: 'none', touchAction: 'none',
     }, '🎵');
-    fab.title = '点歌（可拖动）';
+    fab.title = '点歌 v' + VERSION + '（可拖动）';
 
     /* ============ 面板（可拖动标题栏） ============ */
     const panel = el('div', {
@@ -800,7 +805,7 @@
     makeDraggable(fab, fab, () => { panel.style.display = panel.style.display === 'none' ? 'flex' : 'none'; });
     makeDraggable(panel, title);
 
-    console.log('%c[iirose 点歌] 已加载', 'color:#ec4141;font-weight:bold');
+    console.log('%c[iirose 点歌] v' + VERSION + ' 已加载（网易云 + QQ 音乐）', 'color:#ec4141;font-weight:bold');
   }
 
   /* 启动时机兜底：body 可能未就绪（对照 collector.js） */
