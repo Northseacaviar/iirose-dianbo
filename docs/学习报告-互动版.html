@@ -12,6 +12,18 @@
     font-size: 15px; line-height: 1.85;
   }
   #bar { position: fixed; top: 0; left: 0; height: 3px; width: 0; background: #c2453a; z-index: 99; }
+  /* 右下角：学习档案入口 + 落盘状态 */
+  #diskBar { position: fixed; right: 16px; bottom: 16px; z-index: 95; display: flex;
+             flex-direction: column; gap: 6px; align-items: flex-end; }
+  #diskBar .db-a, #diskBar .db-b { display: block; background: #c2453a; color: #fff; border: none;
+             text-decoration: none; padding: 8px 15px; border-radius: 18px; font-size: 12.5px;
+             font-family: inherit; cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,.16); }
+  #diskBar .db-b { background: #6b5033; }
+  #diskBar .db-b.ok { background: #3f8f5b; }
+  #diskBar .db-m { background: #fffdfa; border: 1px solid #ecdfd0; color: #8a7d72;
+             padding: 5px 11px; border-radius: 12px; max-width: 240px; text-align: right;
+             font-size: 12px; line-height: 1.5; }
+
   .wrap { max-width: 760px; margin: 0 auto; padding: 56px 22px 120px; }
   h1 { font-size: 27px; line-height: 1.4; margin: 0 0 10px; letter-spacing: .5px; }
   .sub { color: #8a7d72; font-size: 14px; margin-bottom: 26px; }
@@ -358,6 +370,12 @@
   </footer>
 </div>
 
+<div id="diskBar">
+    <a class="db-a" href="file:///D:/%E5%AD%A6%E4%B9%A0%E6%A1%A3%E6%A1%88.html">学习档案</a>
+    <button class="db-b" id="diskBtn" type="button">绑定保存目录</button>
+    <div class="db-m" id="diskMsg">记录只存在浏览器里</div>
+  </div>
+
 <script>
 /* ===== LearnLog v1：跨项目学习追踪（ES5 / 无依赖 / 单键存储） =====
    所有本地文件（file://）共享同一份 localStorage，因此天然跨项目累积。
@@ -445,6 +463,118 @@ var LearnLog = (function () {
     project: function (id) { return load().projects[id] || null; },
     all: load,
     dump: function () { return JSON.stringify(load(), null, 2); }
+  };
+})();
+
+/* ===== LearnLogDisk：把学习记录写进你指定的本地文件夹 =====
+   用 Chrome/Edge 的 File System Access API。首次需要点一下按钮选目录（建议 D:\学习记录），
+   之后权限还在就自动静默写入，权限掉了再点一下即可。
+   不支持该 API 的浏览器：按钮会提示，数据仍留在浏览器本地存储里，不会丢。
+*/
+var LearnLogDisk = (function () {
+  'use strict';
+  var KEY = 'learnlog_v1', DB = 'learnlog_fs', STORE = 'h', HK = 'dir';
+  var handle = null;
+
+  function dayStr() {
+    var d = new Date();
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+  function data() {
+    var raw = null;
+    try { raw = localStorage.getItem(KEY); } catch (e) {}
+    return raw || '{"v":1,"projects":{}}';
+  }
+  function idb(cb) {
+    if (!window.indexedDB) return cb(null);
+    try {
+      var rq = indexedDB.open(DB, 1);
+      rq.onupgradeneeded = function () { try { rq.result.createObjectStore(STORE); } catch (e) {} };
+      rq.onsuccess = function () { cb(rq.result); };
+      rq.onerror = function () { cb(null); };
+    } catch (e) { cb(null); }
+  }
+  function saveHandle(h, cb) {
+    idb(function (db) {
+      if (!db) return cb(false);
+      try {
+        var tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put(h, HK);
+        tx.oncomplete = function () { cb(true); };
+        tx.onerror = function () { cb(false); };
+      } catch (e) { cb(false); }
+    });
+  }
+  function loadHandle(cb) {
+    idb(function (db) {
+      if (!db) return cb(null);
+      try {
+        var tx = db.transaction(STORE, 'readonly');
+        var rq = tx.objectStore(STORE).get(HK);
+        rq.onsuccess = function () { cb(rq.result || null); };
+        rq.onerror = function () { cb(null); };
+      } catch (e) { cb(null); }
+    });
+  }
+  function writeInto(dir, cb) {
+    var txt = data();
+    var names = ['learnlog.json', 'learnlog-' + dayStr() + '.json'];
+    var i = 0;
+    function step() {
+      if (i >= names.length) return cb(true);
+      var nm = names[i++];
+      dir.getFileHandle(nm, { create: true }).then(function (fh) {
+        return fh.createWritable();
+      }).then(function (w) {
+        return w.write(txt).then(function () { return w.close(); });
+      }).then(step).catch(function () { cb(false); });
+    }
+    step();
+  }
+  function ensure(interactive, cb) {
+    if (handle) {
+      handle.queryPermission({ mode: 'readwrite' }).then(function (st) {
+        if (st === 'granted') return cb(handle);
+        if (interactive) {
+          handle.requestPermission({ mode: 'readwrite' }).then(function (s2) {
+            cb(s2 === 'granted' ? handle : null);
+          }).catch(function () { cb(null); });
+        } else { cb(null); }
+      }).catch(function () { cb(null); });
+      return;
+    }
+    loadHandle(function (h) {
+      if (!h) { if (interactive) { pick(cb); } else { cb(null); } return; }
+      handle = h;
+      ensure(interactive, cb);
+    });
+  }
+  function pick(cb) {
+    if (!window.showDirectoryPicker) return cb(null);
+    window.showDirectoryPicker({ id: 'learnlog', mode: 'readwrite' }).then(function (d) {
+      handle = d;
+      saveHandle(d, function () { cb(d); });
+    }).catch(function () { cb(null); });
+  }
+  return {
+    supported: function () { return !!window.showDirectoryPicker; },
+    /* 静默同步：有权限就写，没权限返回 needbind，不打扰用户 */
+    auto: function (cb) {
+      if (!window.showDirectoryPicker) return cb('unsupported');
+      ensure(false, function (h) {
+        if (!h) return cb('needbind');
+        writeInto(h, function (ok) { cb(ok ? 'ok' : 'fail'); });
+      });
+    },
+    /* 用户点按钮：绑定目录并立即写一次 */
+    bind: function (cb) {
+      if (!window.showDirectoryPicker) return cb('unsupported');
+      ensure(true, function (h) {
+        if (!h) return cb('denied');
+        writeInto(h, function (ok) { cb(ok ? 'ok' : 'fail'); });
+      });
+    }
   };
 })();
 
@@ -842,6 +972,36 @@ var LearnLog = (function () {
   qzRender();
   qzRestore();
   qzStat();
+})();
+
+/* ---------- 右下角：学习档案入口 + 记录落盘 ---------- */
+(function () {
+  'use strict';
+  var btn = document.getElementById('diskBtn');
+  var msg = document.getElementById('diskMsg');
+  if (!btn) return;
+  function status(s) {
+    if (s === 'ok') {
+      btn.className = 'db-b ok'; btn.innerHTML = '已同步';
+      msg.innerHTML = '记录已自动写入你绑定的文件夹';
+    } else if (s === 'needbind') {
+      btn.className = 'db-b'; btn.innerHTML = '绑定保存目录';
+      msg.innerHTML = '记录目前只在浏览器里 —— 点一下绑定文件夹（建议 D:\\学习记录）';
+    } else if (s === 'unsupported') {
+      btn.className = 'db-b'; btn.innerHTML = '浏览器不支持写入';
+      msg.innerHTML = '请用 Chrome 或 Edge 打开本页';
+    } else {
+      btn.className = 'db-b'; btn.innerHTML = '重试绑定目录';
+      msg.innerHTML = '没有拿到文件夹写入权限';
+    }
+  }
+  btn.addEventListener('click', function () {
+    btn.innerHTML = '处理中…';
+    LearnLogDisk.bind(status);
+  });
+  LearnLogDisk.auto(status);
+  setInterval(function () { LearnLogDisk.auto(function (s) { if (s !== 'fail') status(s); }); }, 60000);
+  window.addEventListener('beforeunload', function () { LearnLogDisk.auto(function () {}); });
 })();
 </script>
 </body>
