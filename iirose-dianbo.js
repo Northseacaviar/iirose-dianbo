@@ -175,6 +175,151 @@
       return '';
     }
 
+    /* ============ QQ 音乐数据层（第三方聚合接口 + 可插拔直链提供方） ============ */
+    // 协议依据：iirose 媒体类型码里 QQ 音乐 = @2（卡片与事件同码）
+    // 背景（见 research/feasibility/QQ音乐点播可行性报告.md）：
+    //  - QQ 官方接口无 CORS，且匿名一律不给直链 → 浏览器里只能走第三方聚合接口
+    //  - 会员歌的完整直链拿不到（需绿钻 cookie），本插件只播「能拿到完整直链」的歌
+    // #region QQ-LAYER
+    const QQ_TYPE = '@2';
+    const VKEYS_API = 'https://api.vkeys.cn/v2/music/tencent';
+
+    // iirose 是 https 页面：媒体地址必须是 https，否则被浏览器按混合内容拦掉。
+    // 第三方给的直链默认是 http://ws.stream.qqmusic.qq.com/... —— 实测改 https 后照样 206。
+    function toHttps(url) {
+      return String(url || '').replace(/^http:\/\//, 'https://');
+    }
+
+    // "0.92MB" / 1234567 → 字节
+    function parseSize(size) {
+      if (typeof size === 'number') return size;
+      const m = String(size || '').match(/([\d.]+)\s*(KB|MB|GB)?/i);
+      if (!m) return 0;
+      const n = parseFloat(m[1]);
+      const unit = (m[2] || '').toUpperCase();
+      const mul = unit === 'GB' ? 1073741824 : unit === 'MB' ? 1048576 : unit === 'KB' ? 1024 : 1;
+      return Math.round(n * mul);
+    }
+
+    // "4分29秒" / 269 → 秒
+    function parseInterval(interval) {
+      if (typeof interval === 'number') return interval;
+      const t = String(interval || '');
+      const mm = t.match(/(\d+)\s*分/);
+      const ss = t.match(/(\d+)\s*秒/);
+      if (mm || ss) return (mm ? Number(mm[1]) * 60 : 0) + (ss ? Number(ss[1]) : 0);
+      const sec = t.match(/^\d+$/);
+      return sec ? Number(sec[0]) : 0;
+    }
+
+    // 判断直链是「完整曲目」还是「试听片段」——两个独立信号：
+    //   1) quality 直接标注「音乐试听」（实测会员歌就是这个）
+    //   2) 用 size÷duration 反推码率：试听是 60 秒内容却配完整时长，比例会崩
+    //      （实测晴天 0.92MB ÷ 269s ≈ 29kbps；完整曲目最低也有 128kbps）
+    function isCompleteAudio(quality, size, duration) {
+      if (/试听/.test(String(quality || ''))) return false;
+      if (size > 0 && duration > 0) {
+        const kbps = (size * 8) / duration / 1000;
+        if (kbps < 64) return false;
+      }
+      return true;
+    }
+
+    async function jsonGet(url, timeout) {
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeout || 10000) });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }
+
+    // 直链提供方：可插拔列表，依次尝试，第一个成功即用（今天只有 vkeys 可用，
+    // 其他家实测全挂，见可行性报告；以后新增提供方只需往这里加一项）
+    const QQ_URL_PROVIDERS = [
+      {
+        name: 'vkeys',
+        async getUrl(mid, quality) {
+          const r = await jsonGet(`${VKEYS_API}/geturl?mid=${encodeURIComponent(mid)}&quality=${quality || '8'}`);
+          const d = r && r.data;
+          if (!d || !d.url) throw new Error((r && r.message) || '无直链');
+          return { url: toHttps(d.url), size: parseSize(d.size), quality: d.quality || '' };
+        },
+      },
+    ];
+
+    // 关键词搜索 → 统一结构（source 标记用于后面选类型码 + 回退）
+    async function qqSearch(keyword, count) {
+      const r = await jsonGet(`${VKEYS_API}?word=${encodeURIComponent(keyword)}&page=1&num=${count || 8}`);
+      const data = r && r.data;
+      if (!Array.isArray(data)) throw new Error((r && r.message) || '搜索返回格式异常');
+      return data.map((s) => ({
+        source: 'qq',
+        id: String(s.id),
+        mid: s.mid,
+        name: s.song,
+        singer: s.singer || '',
+        album: s.album || '',
+        cover: toHttps(s.cover || ''),
+        duration: parseInterval(s.interval),
+        pay: s.pay || '',
+        quality: s.quality || '',
+      }));
+    }
+
+    // 按 mid 取详情（vkeys 搜索已给全字段，这里用于 QQ 链接点播）
+    async function qqDetail(mid) {
+      const r = await jsonGet(`${VKEYS_API}?mid=${encodeURIComponent(mid)}`);
+      const s = r && r.data;
+      if (!s || !s.mid) throw new Error('无法获取歌曲信息（接口失效或链接有误）');
+      return {
+        source: 'qq',
+        id: String(s.id),
+        mid: s.mid,
+        name: s.song,
+        singer: s.singer || '',
+        album: s.album || '',
+        cover: toHttps(s.cover || ''),
+        duration: parseInterval(s.interval),
+        pay: s.pay || '',
+        quality: s.quality || '',
+      };
+    }
+
+    // 歌词（LRC 文本）
+    async function qqLyrics(id) {
+      try {
+        const r = await jsonGet(`${VKEYS_API}/lyric?id=${encodeURIComponent(id)}`);
+        if (r && r.data && r.data.lrc) return r.data.lrc;
+      } catch (e) { /* 歌词可为空 */ }
+      return '';
+    }
+
+    // 直链 + 完整性判定
+    async function qqGetUrl(mid, duration) {
+      let lastErr = null;
+      for (const p of QQ_URL_PROVIDERS) {
+        try {
+          const r = await p.getUrl(mid);
+          return {
+            url: r.url,
+            size: r.size,
+            quality: r.quality,
+            provider: p.name,
+            complete: isCompleteAudio(r.quality, r.size, duration),
+          };
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('无法获取播放链接');
+    }
+
+    // 从文本提取 QQ 音乐 mid：songDetail 链接、?mid=xxx、或 14 位纯 mid
+    function qqExtractMid(text) {
+      const t = String(text || '').trim();
+      const m = t.match(/[?&]mid=([A-Za-z0-9]+)/) || t.match(/songDetail\/([A-Za-z0-9]+)/);
+      if (m) return m[1];
+      if (/^[A-Za-z0-9]{14}$/.test(t)) return t;
+      return null;
+    }
+    // #endregion
+
     // 颜色美化：深色提亮、浅色压暗、偏灰保底饱和，保证卡片色可读且不刺眼
     function beautifyColor(hex) {
       const r0 = parseInt(hex.slice(0, 2), 16), g0 = parseInt(hex.slice(2, 4), 16), b0 = parseInt(hex.slice(4, 6), 16);
