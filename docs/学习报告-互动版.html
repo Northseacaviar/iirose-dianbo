@@ -99,6 +99,23 @@
   #gdef { margin-top: 12px; padding: 14px 16px; background: #fffdfa; border: 1px dashed #e0cfbb; border-radius: 8px; font-size: 13.5px; min-height: 54px; }
 
   ul.q { padding-left: 20px; }
+
+  /* 小测验 */
+  .q { background: #fff; border: 1px solid #ecdfd0; border-radius: 10px; padding: 16px 18px; margin: 14px 0; }
+  .q .qt { font-weight: 600; margin-bottom: 10px; line-height: 1.7; }
+  .q .qt .num { display: inline-block; width: 20px; height: 20px; line-height: 20px; text-align: center;
+                border-radius: 50%; background: #f6ece0; color: #a8752f; font-size: 12.5px; margin-right: 8px; }
+  .opt { display: block; width: 100%; text-align: left; background: #fdfaf6; border: 1px solid #e6d8c8;
+         border-radius: 8px; padding: 9px 13px; margin: 7px 0; cursor: pointer; font-size: 13.5px;
+         font-family: inherit; color: #4a4038; line-height: 1.6; transition: all .15s; }
+  .opt:hover { background: #f7efe4; }
+  .opt.right { background: #f0f8f2; border-color: #8ec79f; color: #2f6b43; font-weight: 600; }
+  .opt.wrong { background: #fdf2f0; border-color: #e0a79c; color: #a83a2c; text-decoration: line-through; }
+  .fed { display: none; margin-top: 12px; padding-top: 11px; border-top: 1px dashed #e8dbcb;
+         font-size: 13.5px; color: #5c4f45; }
+  .fed.on { display: block; }
+  .retry { display: none; margin-top: 9px; font-size: 13px; color: #c98a1e; }
+  .retry.on { display: block; }
   ul.q li { margin: 8px 0; }
   footer { margin-top: 60px; color: #a3937f; font-size: 12.5px; border-top: 1px solid #ecdfd0; padding-top: 16px; }
   .kbd { background: #f2e9de; border: 1px solid #e0d1bd; border-radius: 4px; padding: 1px 6px; font-size: 12.5px; }
@@ -325,6 +342,14 @@
     <li><b>靠间接信号下判断时</b> —— 这个判据在极端情况下会不会失效？拿不到信号时默认值保守吗？</li>
     <li><b>改完代码别人说没变化时</b> —— 先数一数中间有几道缓存、几份副本。</li>
   </ul>
+
+  <h2>九、小测验：五道判断题</h2>
+  <p>
+    每题只有一个答案。规矩是<b>第一次选错不揭晓</b> —— 只让你再试一次，第二次才给答案和理由。
+    这样你第一反应里的判断才会被真正检验，而不是被答案牵着走。
+  </p>
+  <div id="quiz"></div>
+  <p class="hint" id="quizStat"></p>
 
   <footer>
     互动短文版 · 内容取自本次改造的真实记录（可行性报告 / 立项 / 两份独立审查报告）。
@@ -554,6 +579,133 @@
       if (t) { t.className = 'term on'; gdef.innerHTML = GL[last]; }
     }
   })();
+
+  /* ---------- 九、小测验：第一次答错不揭晓 ---------- */
+  var QZ = [
+    {
+      q: '两个平台的歌曲 id 都是纯数字。代码如果<b>不看 source</b>、直接拿 QQ 的 id 去调网易云接口，会发生什么？',
+      opts: ['直接报错，提示"找不到这首歌"',
+             '悄悄播成另一首歌，全程没有任何异常提示',
+             '播放卡住，界面一直停在"点播中"'],
+      a: 1,
+      why: '网易云不会报错 —— 它会返回另一首歌的详情。结果是你点了 A、房间放的是 B，卡片上还标着"网易云源"。不报错的错误，比崩溃难发现得多。'
+    },
+    {
+      q: '一首只有 <b>110 秒</b>的短歌，试听文件 0.92MB。分别用"大小 ÷ 时长"和"实际码率"来判断，结论会怎样？',
+      opts: ['两种判据一致，都判成试听',
+             '比值法误判成完整版，码率法判对了',
+             '比值法判对，码率法误判'],
+      a: 1,
+      why: '0.92MB ÷ 110 秒 ≈ 70kbps，越过了 64kbps 阈值 → 比值法判"完整"。可它其实是 60 秒的试听。码率法读的是文件的实际码率（28kbps），与歌长无关，所以不受影响。'
+    },
+    {
+      q: '你改完代码推上线、CDN 也刷了、自己强刷后已是新版。可房间里的朋友还是旧版。最可能卡在哪？',
+      opts: ['CDN 又被缓存了',
+             '朋友那侧：浏览器缓存没强刷，或者他的注入地址压根没换',
+             '代码有语法错误，他那边跑不起来'],
+      a: 1,
+      why: '排查要按"用户那侧"的顺序来：他的浏览器缓存（默认地址缓存 7 天），以及 iirose 存在 localStorage 里的注入地址 —— 后者不重新粘贴，浏览器根本不会去请求新文件。'
+    },
+    {
+      q: '主路拿不到完整数据时，下面哪种处理最糟？',
+      opts: ['明确报错，说清为什么拿不到',
+             '换用备选方案，并告诉用户"已改用谁"',
+             '拿残缺的数据糊过去，不提示'],
+      a: 2,
+      why: '前两种用户都知道发生了什么；第三种用户以为成功了，实际是残缺结果 —— 而且往往过一阵才暴露（听到 60 秒突然断掉），那时他已经把原因归到别处了。'
+    },
+    {
+      q: '第三方给的播放地址是 http://，页面是 https。点了歌没声音，界面也没提示异常。先怀疑什么？',
+      opts: ['浏览器把 http 资源当"混合内容"拦掉了',
+             '文件太大，还在加载',
+             '用户网络不好'],
+      a: 0,
+      why: 'https 页面加载 http 资源会被浏览器直接拦掉（混合内容），现象就是"地址明明拿到了、却没声音、也没明显报错"。任何外部资源进页面前，先检查协议。'
+    }
+  ];
+
+  var quizBox = document.getElementById('quiz');
+  var quizStat = document.getElementById('quizStat');
+  var qzDone = {};    // 已完成：1 = 一次选对，2 = 第二次才选对
+  var qzTries = {};   // 每题已尝试次数
+
+  function qzRender() {
+    var h = '';
+    for (var i = 0; i < QZ.length; i++) {
+      h += '<div class="q" data-q="' + i + '">';
+      h += '<div class="qt"><span class="num">' + (i + 1) + '</span>' + QZ[i].q + '</div>';
+      for (var j = 0; j < QZ[i].opts.length; j++) {
+        h += '<button class="opt" data-o="' + j + '">' + QZ[i].opts[j] + '</button>';
+      }
+      h += '<div class="retry">再试一次。</div>';
+      h += '<div class="fed"></div>';
+      h += '</div>';
+    }
+    quizBox.innerHTML = h;
+  }
+
+  function qzStat() {
+    var done = 0, first = 0;
+    for (var k in qzDone) {
+      if (qzDone.hasOwnProperty(k)) { done++; if (qzDone[k] === 1) first++; }
+    }
+    if (!done) { quizStat.innerHTML = '还没开始 · 共 ' + QZ.length + ' 题'; return; }
+    quizStat.innerHTML = '已完成 ' + done + ' / ' + QZ.length + ' 题' +
+      (done === QZ.length ? ' · 其中一次就选对 ' + first + ' 题' : '');
+  }
+
+  function qzReveal(qEl, qi, wrongBtn) {
+    var opts = qEl.querySelectorAll('.opt');
+    opts[QZ[qi].a].className = 'opt right';
+    if (wrongBtn) wrongBtn.className = 'opt wrong';
+    var fed = qEl.querySelector('.fed');
+    fed.innerHTML = QZ[qi].why;
+    fed.className = 'fed on';
+    qEl.querySelector('.retry').className = 'retry';
+  }
+
+  function qzSave() {
+    try { localStorage.setItem(PRE + 'qz', JSON.stringify(qzDone)); } catch (e) {}
+  }
+
+  quizBox.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.opt') : null;
+    if (!btn) return;
+    var qEl = btn.parentNode;
+    var qi = parseInt(qEl.getAttribute('data-q'), 10);
+    if (qzDone[qi]) return;                                  // 已结束，锁定
+    var oi = parseInt(btn.getAttribute('data-o'), 10);
+    qzTries[qi] = (qzTries[qi] || 0) + 1;
+
+    if (oi === QZ[qi].a) {                                   // 选对
+      qzDone[qi] = qzTries[qi] === 1 ? 1 : 2;
+      qzReveal(qEl, qi, null);
+      qzSave(); qzStat();
+    } else if (qzTries[qi] === 1) {                          // 第一次错：不揭晓、不标色
+      qEl.querySelector('.retry').className = 'retry on';
+    } else {                                                 // 第二次错：揭晓
+      qzDone[qi] = 2;
+      qzReveal(qEl, qi, btn);
+      qzSave(); qzStat();
+    }
+  });
+
+  function qzRestore() {
+    var raw = null;
+    try { raw = localStorage.getItem(PRE + 'qz'); } catch (e) {}
+    if (!raw) return;
+    try { qzDone = JSON.parse(raw) || {}; } catch (e) { qzDone = {}; }
+    for (var k in qzDone) {
+      if (!qzDone.hasOwnProperty(k)) continue;
+      var qi = parseInt(k, 10);
+      var qEl = quizBox.querySelector('[data-q="' + qi + '"]');
+      if (qEl && QZ[qi]) qzReveal(qEl, qi, null);
+    }
+  }
+
+  qzRender();
+  qzRestore();
+  qzStat();
 })();
 </script>
 </body>
