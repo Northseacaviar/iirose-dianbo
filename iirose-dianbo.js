@@ -104,6 +104,7 @@
         const list = await gdGet({ types: 'search', name: keyword, count: String(count) });
         if (Array.isArray(list) && list.length) {
           return list.map((s) => ({
+            source: 'netease',
             id: String(s.id),
             name: s.name,
             singer: Array.isArray(s.artist) ? s.artist.join('/') : (s.artist || ''),
@@ -116,6 +117,7 @@
       const songs = d.result && d.result.songs;
       if (!Array.isArray(songs)) throw new Error('搜索返回格式异常');
       return songs.map((s) => ({
+        source: 'netease',
         id: String(s.id),
         name: s.name,
         singer: (s.ar || []).map((a) => a.name).join('/'),
@@ -140,6 +142,7 @@
       const s = data.songs && data.songs[0];
       if (!s) throw new Error('无法获取歌曲信息（接口失效或链接有误）');
       return {
+        source: 'netease',
         id: String(s.id),
         name: s.name,
         singer: (s.ar || []).map((a) => a.name).join('/'),
@@ -182,139 +185,208 @@
     //  - 会员歌的完整直链拿不到（需绿钻 cookie），本插件只播「能拿到完整直链」的歌
     // #region QQ-LAYER
     const QQ_TYPE = '@2';
-    const VKEYS_API = 'https://api.vkeys.cn/v2/music/tencent';
+    const QQ_DEFAULT_QUALITY = '8';   // 128k；实测 8/9 对免费歌返回同一份 HQ，10 才是无损，16 是「AI人声消音(试验)」
+    // 聚合接口 base 列表（多实例：依次尝试，任一失效自动切下一个 —— 与网易云层的 fetchAny 同思路）
+    const QQ_APIS = ['https://api.vkeys.cn/v2/music'];
 
     // iirose 是 https 页面：媒体地址必须是 https，否则被浏览器按混合内容拦掉。
     // 第三方给的直链默认是 http://ws.stream.qqmusic.qq.com/... —— 实测改 https 后照样 206。
+    // 注意大小写：上游给 HTTP:// 也必须改写（stripScheme 只认小写 s:// 前缀，写错等于静音）
     function toHttps(url) {
-      return String(url || '').replace(/^http:\/\//, 'https://');
+      return String(url || '').replace(/^https?:\/\//i, 'https://');
     }
 
-    // "0.92MB" / 1234567 → 字节
+    // "0.92MB" / "10.09M" / "1,234,567" → 字节（上游格式不稳，多留一手）
     function parseSize(size) {
-      if (typeof size === 'number') return size;
-      const m = String(size || '').match(/([\d.]+)\s*(KB|MB|GB)?/i);
+      if (typeof size === 'number') return Math.max(0, Math.round(size));
+      const m = String(size || '').replace(/,/g, '').match(/^\s*(-?[\d.]+)\s*([KMGT]?)(?:i?[Bb])?\s*$/);
       if (!m) return 0;
-      const n = parseFloat(m[1]);
+      const n = Math.abs(parseFloat(m[1]));
       const unit = (m[2] || '').toUpperCase();
-      const mul = unit === 'GB' ? 1073741824 : unit === 'MB' ? 1048576 : unit === 'KB' ? 1024 : 1;
+      const mul = unit === 'T' ? 1099511627776 : unit === 'G' ? 1073741824
+        : unit === 'M' ? 1048576 : unit === 'K' ? 1024 : 1;
       return Math.round(n * mul);
     }
 
-    // "4分29秒" / 269 → 秒
+    // "350kbps" / 319 → 319
+    function parseKbps(kbps) {
+      const n = parseFloat(String(kbps == null ? '' : kbps).replace(/[^\d.]/g, ''));
+      return isFinite(n) && n > 0 ? n : 0;
+    }
+
+    // "4分29秒" / "60分18秒" / "1小时2分3秒" / "1:02:03" / 269 → 秒
     function parseInterval(interval) {
-      if (typeof interval === 'number') return interval;
-      const t = String(interval || '');
+      if (typeof interval === 'number') return interval > 0 ? interval : 0;
+      const t = String(interval || '').trim();
+      const hh = t.match(/(\d+)\s*小时/);
       const mm = t.match(/(\d+)\s*分/);
       const ss = t.match(/(\d+)\s*秒/);
-      if (mm || ss) return (mm ? Number(mm[1]) * 60 : 0) + (ss ? Number(ss[1]) : 0);
+      if (hh || mm || ss) return (hh ? Number(hh[1]) * 3600 : 0) + (mm ? Number(mm[1]) * 60 : 0) + (ss ? Number(ss[1]) : 0);
+      const colon = t.match(/^(\d+):(\d{1,2})(?::(\d{1,2}))?$/);
+      if (colon) {
+        return colon[3] !== undefined
+          ? Number(colon[1]) * 3600 + Number(colon[2]) * 60 + Number(colon[3])
+          : Number(colon[1]) * 60 + Number(colon[2]);
+      }
       const sec = t.match(/^\d+$/);
       return sec ? Number(sec[0]) : 0;
     }
 
-    // 判断直链是「完整曲目」还是「试听片段」——两个独立信号：
-    //   1) quality 直接标注「音乐试听」（实测会员歌就是这个）
-    //   2) 用 size÷duration 反推码率：试听是 60 秒内容却配完整时长，比例会崩
-    //      （实测晴天 0.92MB ÷ 269s ≈ 29kbps；完整曲目最低也有 128kbps）
-    function isCompleteAudio(quality, size, duration) {
+    // 判断直链是「完整曲目」还是「试听片段」。判据按可靠性排序（阈值全部来自实测）：
+    //   1) quality 含「音乐试听」—— 会员歌就是这个标签
+    //   2) 文件实际码率 < 100kbps —— 试听恒为 28kbps，完整曲目 ≥128kbps。
+    //      这条不依赖时长，所以短曲也不会漏判（纯比值法在 ≤120 秒的歌上会假阳性：
+    //      0.92MB 试听 ÷ 120s ≈ 64kbps，正好压在阈值上）
+    //   3) 拿不到码率时退回 size÷duration 比值（<64kbps 视为片段）
+    //   4) 码率与时长都拿不到 → 不敢判完整（宁可走回退链，也不给用户放 60 秒还显示「已点播」）
+    function isCompleteAudio(quality, size, duration, kbps) {
       if (/试听/.test(String(quality || ''))) return false;
-      if (size > 0 && duration > 0) {
-        const kbps = (size * 8) / duration / 1000;
-        if (kbps < 64) return false;
-      }
-      return true;
+      const rate = Number(kbps) || 0;
+      if (rate > 0) return rate >= 100;
+      const dur = Number(duration) || 0;
+      if (dur <= 0) return false;
+      if (size > 0) return (size * 8) / dur / 1000 >= 64;
+      return false;
     }
 
     async function jsonGet(url, timeout) {
       const res = await fetch(url, { signal: AbortSignal.timeout(timeout || 10000) });
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch (e) { const err = new Error('接口返回格式异常'); err.reason = 'bad_response'; throw err; }
+      // vkeys 的业务错误也走 HTTP 200，必须看 code，否则错误全被当成成功
+      const code = data && data.code;
+      if (code !== undefined && code !== null && String(code) !== '0' && String(code) !== '200') {
+        const err = new Error((data && data.message) || ('接口错误 ' + code));
+        err.reason = classifyQqError(data && data.message);
+        err.code = code;
+        throw err;
+      }
+      return data;
     }
 
-    // 直链提供方：可插拔列表，依次尝试，第一个成功即用（今天只有 vkeys 可用，
-    // 其他家实测全挂，见可行性报告；以后新增提供方只需往这里加一项）
+    // 业务错误分类（供回退链判断：该换源 / 该重试 / 该报链接有误）
+    function classifyQqError(message) {
+      const m = String(message || '');
+      if (/无音质|付费专辑/.test(m)) return 'no_audio';      // 拿不到可播文件 → 换源
+      if (/风控|cookie/i.test(m)) return 'cookie';           // 服务端账号问题 → 换提供方/换源
+      if (/缺少|参数|必填|格式|不存在/.test(m)) return 'bad_param';
+      return 'unknown';
+    }
+
+    // 多实例请求：base 依次尝试，任一失效自动切下一个
+    async function qqGet(path, params, timeout) {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      let lastErr = null;
+      for (const base of QQ_APIS) {
+        try { return await jsonGet(base + path + qs, timeout); }
+        catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('QQ 音乐接口不可用');
+    }
+
+    // 上游字段 → 本插件统一歌曲结构
+    function mapQqSong(s) {
+      if (!s || !s.mid) return null;
+      return {
+        source: 'qq',
+        id: s.id ? String(s.id) : '',
+        mid: s.mid,
+        name: s.song || '',
+        singer: s.singer || '',
+        album: s.album || '',
+        cover: toHttps(s.cover || ''),
+        duration: parseInterval(s.interval),
+        pay: s.pay || '',            // 仅展示：实测标「付费」的歌也可能完整可播，不可当会员判据
+        quality: s.quality || '',    // 注意语义：搜索给「平台最高音质」，geturl 给「实际文件音质」
+        kbps: parseKbps(s.kbps),
+        link: s.link || '',
+      };
+    }
+
+    // 直链提供方：可插拔列表。循环语义 —— 拿到「不完整」不算成功，要继续试后面的提供方；
+    // 只有所有提供方都给不出完整版，才把最后一个不完整结果交上层去走回退。
     const QQ_URL_PROVIDERS = [
       {
         name: 'vkeys',
         async getUrl(mid, quality) {
-          const r = await jsonGet(`${VKEYS_API}/geturl?mid=${encodeURIComponent(mid)}&quality=${quality || '8'}`);
+          const r = await qqGet('/tencent/geturl', { mid: mid, quality: quality || QQ_DEFAULT_QUALITY });
           const d = r && r.data;
           if (!d || !d.url) throw new Error((r && r.message) || '无直链');
-          return { url: toHttps(d.url), size: parseSize(d.size), quality: d.quality || '' };
+          return {
+            url: toHttps(d.url),
+            size: parseSize(d.size),
+            kbps: parseKbps(d.kbps),
+            quality: d.quality || '',
+          };
         },
       },
     ];
 
-    // 关键词搜索 → 统一结构（source 标记用于后面选类型码 + 回退）
+    // 关键词搜索 → 统一结构（source 用于选类型码 + 回退）
     async function qqSearch(keyword, count) {
-      const r = await jsonGet(`${VKEYS_API}?word=${encodeURIComponent(keyword)}&page=1&num=${count || 8}`);
+      const r = await qqGet('/tencent', { word: keyword, page: 1, num: count || 8 });
       const data = r && r.data;
       if (!Array.isArray(data)) throw new Error((r && r.message) || '搜索返回格式异常');
-      return data.map((s) => ({
-        source: 'qq',
-        id: String(s.id),
-        mid: s.mid,
-        name: s.song,
-        singer: s.singer || '',
-        album: s.album || '',
-        cover: toHttps(s.cover || ''),
-        duration: parseInterval(s.interval),
-        pay: s.pay || '',
-        quality: s.quality || '',
-      }));
+      return data.map(mapQqSong).filter(Boolean);
     }
 
-    // 按 mid 取详情（vkeys 搜索已给全字段，这里用于 QQ 链接点播）
+    // 按 mid 取详情（搜索返回数组、详情返回对象，两者形态不一致，这里都吃）
     async function qqDetail(mid) {
-      const r = await jsonGet(`${VKEYS_API}?mid=${encodeURIComponent(mid)}`);
-      const s = r && r.data;
-      if (!s || !s.mid) throw new Error('无法获取歌曲信息（接口失效或链接有误）');
-      return {
-        source: 'qq',
-        id: String(s.id),
-        mid: s.mid,
-        name: s.song,
-        singer: s.singer || '',
-        album: s.album || '',
-        cover: toHttps(s.cover || ''),
-        duration: parseInterval(s.interval),
-        pay: s.pay || '',
-        quality: s.quality || '',
-      };
+      const r = await qqGet('/tencent', { mid: mid });
+      const raw = r && r.data;
+      const song = mapQqSong(Array.isArray(raw) ? raw[0] : raw);
+      if (!song) throw new Error('无法获取歌曲信息（接口失效或链接有误）');
+      return song;
     }
 
     // 歌词（LRC 文本）
     async function qqLyrics(id) {
       try {
-        const r = await jsonGet(`${VKEYS_API}/lyric?id=${encodeURIComponent(id)}`);
+        const r = await qqGet('/tencent/lyric', { id: id });
         if (r && r.data && r.data.lrc) return r.data.lrc;
       } catch (e) { /* 歌词可为空 */ }
       return '';
     }
 
-    // 直链 + 完整性判定
+    // 直链 + 完整性判定：拿到完整才算成功；只剩不完整结果时返回它（complete:false）由上层回退
     async function qqGetUrl(mid, duration) {
       let lastErr = null;
+      let partial = null;
       for (const p of QQ_URL_PROVIDERS) {
         try {
           const r = await p.getUrl(mid);
-          return {
+          const got = {
             url: r.url,
             size: r.size,
+            kbps: r.kbps,
             quality: r.quality,
             provider: p.name,
-            complete: isCompleteAudio(r.quality, r.size, duration),
+            complete: isCompleteAudio(r.quality, r.size, duration, r.kbps),
           };
+          if (got.complete) return got;
+          if (!partial) partial = got;
         } catch (e) { lastErr = e; }
       }
+      if (partial) return partial;
       throw lastErr || new Error('无法获取播放链接');
     }
 
-    // 从文本提取 QQ 音乐 mid：songDetail 链接、?mid=xxx、或 14 位纯 mid
+    // 从文本提取 QQ 音乐 mid。覆盖官方各种分享形式：
+    //   songDetail/<mid>、?songmid=、?mid=、/n/yqq/song/xxx.html、i.y.qq.com/v8/playsong.html?songmid=
+    // 最后对 y.qq.com 链接做一次 14 位兜底（QQ 的 mid 恒为 14 位，实测 80/80）
     function qqExtractMid(text) {
       const t = String(text || '').trim();
-      const m = t.match(/[?&]mid=([A-Za-z0-9]+)/) || t.match(/songDetail\/([A-Za-z0-9]+)/);
+      let m = t.match(/[?&](?:song)?mid=([A-Za-z0-9]{10,20})/);
       if (m) return m[1];
+      m = t.match(/songDetail\/([A-Za-z0-9]{10,20})/) || t.match(/\/(?:n\/yqq\/)?song\/([A-Za-z0-9]{10,20})/);
+      if (m) return m[1];
+      if (/y\.qq\.com|qqmusic/i.test(t)) {
+        m = t.match(/([A-Za-z0-9]{14})/);
+        if (m) return m[1];
+      }
       if (/^[A-Za-z0-9]{14}$/.test(t)) return t;
       return null;
     }
