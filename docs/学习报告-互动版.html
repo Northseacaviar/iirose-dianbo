@@ -133,6 +133,7 @@
     完整版纯前端拿不到。所以最后做成：<b>能完整播的就用 QQ，拿不到就自动改点网易云同名单曲</b>，
     并且把"为什么换了"明说给你。
     <div class="hint">往下每节都能点、能拖。全程约 8 分钟。</div>
+    <div class="hint" id="logLine"></div>
   </div>
 
   <h2>一、骨架：一次点播要穿过五层</h2>
@@ -358,6 +359,95 @@
 </div>
 
 <script>
+/* ===== LearnLog v1：跨项目学习追踪（ES5 / 无依赖 / 单键存储） =====
+   所有本地文件（file://）共享同一份 localStorage，因此天然跨项目累积。
+   存储键：learnlog_v1
+*/
+var LearnLog = (function () {
+  'use strict';
+  var KEY = 'learnlog_v1';
+  var TICK = 10;                 // 计时粒度（秒）
+  var curId = null, timer = null;
+
+  function now() { return new Date().getTime(); }
+  function blank() { return { v: 1, projects: {} }; }
+  function load() {
+    var raw = null;
+    try { raw = localStorage.getItem(KEY); } catch (e) { return blank(); }
+    if (!raw) return blank();
+    try { return JSON.parse(raw) || blank(); } catch (e) { return blank(); }
+  }
+  function save(d) { try { localStorage.setItem(KEY, JSON.stringify(d)); } catch (e) {} }
+  function proj(d, id, meta) {
+    if (!d.projects[id]) {
+      d.projects[id] = { title: id, kind: '', file: '', seconds: 0, opens: 0,
+                         first: now(), last: now(), read: {}, quiz: {}, events: [] };
+    }
+    var p = d.projects[id];
+    if (meta) {
+      if (meta.title) p.title = meta.title;
+      if (meta.kind) p.kind = meta.kind;
+      if (meta.file) p.file = meta.file;
+    }
+    return p;
+  }
+  function push(p, ev) {
+    p.events.push(ev);
+    if (p.events.length > 400) p.events = p.events.slice(-300);
+  }
+  function tick() {
+    if (!curId || document.hidden) return;        // 切走就不计时
+    var d = load(), p = proj(d, curId);
+    p.seconds += TICK; p.last = now();
+    save(d);
+  }
+  return {
+    /* 打开文章时调用一次 */
+    open: function (id, meta) {
+      var d = load(), p = proj(d, id, meta);
+      p.opens++; p.last = now();
+      push(p, { t: now(), k: 'open' });
+      save(d);
+      curId = id;
+      if (timer) clearInterval(timer);
+      timer = setInterval(tick, TICK * 1000);
+      window.addEventListener('beforeunload', function () { tick(); });
+      document.addEventListener('visibilitychange', function () { if (document.hidden) tick(); });
+      return p;
+    },
+    /* 读到某一节（同一节只记第一次） */
+    section: function (key, label) {
+      if (!curId) return;
+      var d = load(), p = proj(d, curId);
+      if (!p.read[key]) {
+        p.read[key] = { at: now(), label: label || '' };
+        push(p, { t: now(), k: 'read', s: key });
+        p.last = now();
+        save(d);
+      }
+    },
+    /* 每次作答都调用：ok = 这次是否选对，tryNo = 第几次尝试 */
+    quiz: function (qi, qText, ok, tryNo) {
+      if (!curId) return;
+      var d = load(), p = proj(d, curId);
+      var rec = p.quiz[qi];
+      if (!rec) rec = { tries: 0, first: null, at: 0, q: '', right: 0, wrong: 0 };
+      rec.tries = tryNo;
+      rec.q = String(qText || '').replace(/<[^>]*>/g, '').slice(0, 46);
+      if (rec.first === null) rec.first = ok ? 1 : 0;   // 只记第一次的结果
+      if (ok) { rec.right++; } else { rec.wrong++; }
+      rec.at = now();
+      p.quiz[qi] = rec;
+      push(p, { t: now(), k: 'q', q: qi, ok: ok ? 1 : 0, n: tryNo });
+      p.last = now();
+      save(d);
+    },
+    project: function (id) { return load().projects[id] || null; },
+    all: load,
+    dump: function () { return JSON.stringify(load(), null, 2); }
+  };
+})();
+
 (function () {
   'use strict';
   var PRE = 'iirose_v060_';
@@ -371,6 +461,49 @@
   }
   window.addEventListener('scroll', onScroll);
   onScroll();
+
+  /* ---------- 学习追踪：计时 / 读到哪节 / 顶部回显 ---------- */
+  var PROJ = 'iirose-dianbo-v060';
+  var PROJ_META = {
+    title: 'iirose 点歌插件 × QQ 音乐（互动短文）',
+    kind: '互动短文',
+    file: location.href
+  };
+  LearnLog.open(PROJ, PROJ_META);
+
+  function renderLogLine() {
+    var el = document.getElementById('logLine');
+    if (!el) return;
+    var p = LearnLog.project(PROJ);
+    if (!p) return;
+    var mins = Math.floor(p.seconds / 60), secs = p.seconds % 60;
+    var ans = 0, firstRight = 0;
+    for (var k in p.quiz) {
+      if (p.quiz.hasOwnProperty(k)) {
+        ans++;
+        if (p.quiz[k].first === 1) firstRight++;
+      }
+    }
+    var bits = [];
+    bits.push('你在这篇已累计学习 ' + (mins > 0 ? mins + ' 分 ' + secs + ' 秒' : secs + ' 秒'));
+    if (ans) bits.push('答过 ' + ans + ' 题，其中一次就选对 ' + firstRight + ' 题');
+    bits.push(p.opens > 1 ? '第 ' + p.opens + ' 次打开' : '第一次打开');
+    el.innerHTML = '学习记录：' + bits.join(' · ');
+  }
+  renderLogLine();
+
+  var h2s = document.querySelectorAll('h2');
+  function markSections() {
+    for (var i = 0; i < h2s.length; i++) {
+      var r = h2s[i].getBoundingClientRect();
+      if (r.top < window.innerHeight && r.bottom > 0) {
+        LearnLog.section('s' + i, h2s[i].textContent.trim().slice(0, 30));
+      }
+    }
+  }
+  markSections();
+  window.addEventListener('scroll', markSections);
+  setInterval(renderLogLine, 15000);
 
   /* ---------- 一、骨架图：点击展开 ---------- */
   var layers = document.querySelectorAll('.layer');
@@ -680,13 +813,16 @@
     if (oi === QZ[qi].a) {                                   // 选对
       qzDone[qi] = qzTries[qi] === 1 ? 1 : 2;
       qzReveal(qEl, qi, null);
-      qzSave(); qzStat();
+      LearnLog.quiz(qi, QZ[qi].q, true, qzTries[qi]);
+      qzSave(); qzStat(); renderLogLine();
     } else if (qzTries[qi] === 1) {                          // 第一次错：不揭晓、不标色
       qEl.querySelector('.retry').className = 'retry on';
+      LearnLog.quiz(qi, QZ[qi].q, false, 1);
     } else {                                                 // 第二次错：揭晓
       qzDone[qi] = 2;
       qzReveal(qEl, qi, btn);
-      qzSave(); qzStat();
+      LearnLog.quiz(qi, QZ[qi].q, false, qzTries[qi]);
+      qzSave(); qzStat(); renderLogLine();
     }
   });
 
