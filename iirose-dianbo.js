@@ -1,5 +1,5 @@
 // ============================================================
-//  iirose 点歌（网易云）v0.5.0 —— 网页发布版
+//  iirose 点歌（网易云 + QQ 音乐）v0.6.0 —— 网页发布版
 // ============================================================
 //  单文件、纯前端、零账号、无混淆，可直接阅读审计。
 //
@@ -10,14 +10,20 @@
 //    4. 输入 js 回车，弹窗粘贴本脚本的【地址】，确定
 //    5. 刷新页面，右下角出现可拖动的 🎵 悬浮球，点击即可搜歌点播
 //
-//  支持两种点歌方式（同一个输入框，自动识别）：
-//    - 歌名/歌手搜索：输入「青花瓷」等关键词 → 列出结果 → 点「点播」
-//    - 网易云链接点播：粘贴 https://music.163.com/song?id=xxx 或纯歌曲 id → 点「点播」
+//  点歌方式（同一个输入框，自动识别）：
+//    - 关键词搜索：网易云 + QQ 音乐一起搜（结果带来源徽标）→ 点「点播」
+//    - 链接点播：网易云 https://music.163.com/song?id=xxx 或纯歌曲 id；
+//      QQ 音乐 songDetail/<mid>、i.y.qq.com/v8/playsong.html?songmid=<mid>、纯 14 位 mid
+//
+//  两个源的能力差异（重要）：
+//    - 网易云：直链/歌词走 GD-Studio（能解 VIP），详情走 NeteaseCloudMusicApi 多实例
+//    - QQ 音乐：走 api.vkeys.cn 聚合接口，只播「拿得到完整直链」的歌；
+//      会员歌只给 60 秒试听 → 不播，自动改点网易云同名单曲（提示里写清回退到了谁）
+//      —— 会员歌完整版需绿钻 cookie，纯前端拿不到（官方接口无 CORS）
 //
 //  说明：
 //    - 点播使用「使用者自己登录的 iirose 账号」，本脚本不含任何他人账号/密码
-//    - 音乐数据多源 fallback：直链/歌词/搜索走 GD-Studio + NeteaseCloudMusicApi 公共实例，
-//      详情走 NeteaseCloudMusicApi 多实例；任一源失效自动切换下一个
+//    - 多源 fallback：任一源失效自动切换下一个；接口全挂时如实报错，不假装「没搜到」
 //    - 站点每次刷新会重新加载本地址，改版后朋友刷新即更新
 //
 //  原理：站点把地址存 localStorage extJs，每次页面加载以 <script src> 注入到
@@ -31,7 +37,8 @@
     window.__IIROSE_DIANBO__ = true;
 
     /* ============ 点播消息拼装（协议见 iirose-docs api_media.md） ============ */
-    const NETEASE_TYPE = '@0';
+    // #region PROTOCOL
+    const NETEASE_TYPE = '@0';   // QQ 音乐的类型码是 @2（见下方 QQ 数据层），新增音源必须显式传码
 
     function encodeHTML(str) {
       const map = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' };
@@ -65,6 +72,7 @@
       };
       return '&1' + JSON.stringify(data);
     }
+    // #endregion
 
     /* ============ 多源数据层（每个操作多源 fallback） ============ */
     // 源清单：
@@ -384,11 +392,14 @@
       if (m) return m[1];
       m = t.match(/songDetail\/([A-Za-z0-9]{10,20})/) || t.match(/\/(?:n\/yqq\/)?song\/([A-Za-z0-9]{10,20})/);
       if (m) return m[1];
+      // 裸 token 兜底：必须 14 位且字母数字混合。纯数字/纯字母的 14 位串多为 id 或页面 token，
+      // 误判会让关键词搜索被整个跳过；实测 QQ 的 songmid 都同时含字母和数字
       if (/y\.qq\.com|qqmusic/i.test(t)) {
-        m = t.match(/([A-Za-z0-9]{14})/);
-        if (m) return m[1];
+        m = t.match(/(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{14}/);
+        if (m) return m[0];
+        return null;   // 是 QQ 链接但取不到 mid → 交给上层如实报错，别降级去搜关键词
       }
-      if (/^[A-Za-z0-9]{14}$/.test(t)) return t;
+      if (/^(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{14}$/.test(t)) return t;
       return null;
     }
     // #endregion
@@ -441,8 +452,10 @@
         const img = new Image();
         img.crossOrigin = 'anonymous';
         await new Promise((resolve, reject) => {
-          img.onload = resolve;
-          img.onerror = () => reject(new Error('封面加载失败'));
+          // 3 秒超时兜底：封面 CDN 连接挂住时既不 load 也不 error，会让「点播中…」永久卡住
+          const timer = setTimeout(() => reject(new Error('封面加载超时')), 3000);
+          img.onload = () => { clearTimeout(timer); resolve(); };
+          img.onerror = () => { clearTimeout(timer); reject(new Error('封面加载失败')); };
           img.src = coverUrl;
         });
         const size = 40;
@@ -498,20 +511,34 @@
 
     /* ============ 点播流程（搜索路径与链接路径共用） ============ */
     // 入口：按 source 分流。网易云走原路径；QQ 走「只播完整版，拿不到就回退网易云同名单曲」。
-    async function dianbo(song) {
-      if ((song.source || 'netease') !== 'qq') return sendNetease(song);
+    // onProgress 为可选进度回调（回退链最坏要 ~70 秒，不刷状态栏用户会以为点了没反应）
+    async function dianbo(song, onProgress) {
+      const say = (t) => { try { if (onProgress) onProgress(t); } catch (e) { /* 提示失败不影响点播 */ } };
 
+      if ((song.source || 'netease') !== 'qq') {
+        say('获取播放链接中…');
+        return sendNetease(song);
+      }
+
+      say('QQ 音乐：获取直链中…');
       let reason = '';
       try {
         const got = await qqGetUrl(song.mid, song.duration);
         if (got.complete) return sendQq(song, got);
-        reason = '只给 ' + Math.round(song.duration || 0) + ' 秒试听片段';
+        // 注意：song.duration 是【整曲时长】（vkeys 的 interval），不是试听时长 —— 试听恒为 60 秒，
+        // 写成 song.duration 会输出「只给 269 秒试听片段」这种自相矛盾的文案
+        reason = /试听/.test(got.quality || '')
+          ? '只给 60 秒试听片段（会员曲目）'
+          : '拿不到可确认的完整版（接口未给码率/时长，无法判定）';
       } catch (e) {
-        reason = e.message || '拿不到播放链接';
+        // 链接/参数本身有问题 → 换源也是白搭，直接如实报错（reason 由 classifyQqError 分类）
+        if (e && e.reason === 'bad_param') throw new Error('QQ 音乐歌曲信息有误：' + e.message);
+        reason = (e && e.message) || '拿不到播放链接';
       }
 
       // 回退：网易云找同名单曲。
       // QQ 会员歌在网易云往往同样没有版权 —— 找不到就如实报错，绝不能让用户点了没反应
+      say('QQ ' + reason + '，正在回退网易云…');
       const alt = await findNeteaseSame(song);
       if (!alt) throw new Error('QQ 音乐「' + song.name + '」' + reason + '，网易云也没有同名单曲');
       // 提示里报清回退到了谁的版本 —— 同名歌很可能是翻唱，用户要能一眼看出
@@ -542,9 +569,11 @@
       const link = 'https://music.163.com/#/song?id=' + song.id;
       const color = await getDominantColor(cover);
 
+      // 事件时长必须为正数：d:0 会让播放器进度错乱，而 UI 还报「已点播」
+      const dur = Math.max(1, Math.round(duration || 0));
       const sock = getSocket();
       sock.send(buildMediaCard(song.name, song.singer, cover, color, 320, NETEASE_TYPE));
-      sock.send(buildMediaEvent(mp3, duration, cover, song.name, song.singer, link, lyrics, NETEASE_TYPE));
+      sock.send(buildMediaEvent(mp3, dur, cover, song.name, song.singer, link, lyrics, NETEASE_TYPE));
       return { note: note || '', source: 'netease', name: song.name, singer: song.singer };
     }
 
@@ -561,7 +590,7 @@
 
       const sock = getSocket();
       sock.send(buildMediaCard(song.name, song.singer, cover, color, br, QQ_TYPE));
-      sock.send(buildMediaEvent(got.url, Math.round(duration), cover, song.name, song.singer, link, lyrics, QQ_TYPE));
+      sock.send(buildMediaEvent(got.url, Math.max(1, Math.round(duration || 0)), cover, song.name, song.singer, link, lyrics, QQ_TYPE));
       return { note: '', source: 'qq', name: song.name, singer: song.singer };
     }
 
@@ -694,7 +723,7 @@
       btn.onclick = async () => {
         btn.disabled = true; btn.textContent = '点播中…';
         try {
-          const r = await dianbo(song);
+          const r = await dianbo(song, (t) => setStatus(t, '#999'));
           setStatus((r && r.note) ? r.note : '已点播：' + song.name + ' - ' + song.singer, '#68b26d');
         } catch (e) {
           setStatus('失败：' + e.message, '#ec4141');
@@ -724,6 +753,11 @@
         }
         return;
       }
+      if (/y\.qq\.com|qqmusic/i.test(kw)) {
+        // 认得出是 QQ 链接但取不到 mid（歌单/歌手页等）→ 说清楚，别默默当成关键词去搜
+        setStatus('这个 QQ 音乐链接里没有歌曲 mid，请用歌曲详情页链接或直接输歌名', '#ec4141');
+        return;
+      }
 
       // —— 网易云链接点播：提取 id 直接拿歌曲 ——
       const songId = extractSongId(kw);
@@ -741,12 +775,19 @@
 
       // —— 关键词搜索：两个源并行，任一挂掉不影响另一个 ——
       setStatus('搜索中…（网易云 + QQ 音乐）', '#999');
-      const [ncm, qq] = await Promise.all([
-        searchSongs(kw, 6).catch(() => []),
-        qqSearch(kw, 6).catch(() => []),
+      const [ncmRes, qqRes] = await Promise.all([
+        searchSongs(kw, 6).then((l) => ({ ok: true, list: l })).catch((e) => ({ ok: false, list: [], err: e })),
+        qqSearch(kw, 6).then((l) => ({ ok: true, list: l })).catch((e) => ({ ok: false, list: [], err: e })),
       ]);
+      const ncm = ncmRes.list, qq = qqRes.list;
       const songs = ncm.concat(qq);
-      if (!songs.length) { setStatus('无结果（两个源都没搜到）', '#ec4141'); return; }
+      if (!songs.length) {
+        // 区分「真没这首歌」和「接口挂了」——把后者说成「没搜到」会误导用户以为没版权
+        setStatus(ncmRes.ok || qqRes.ok
+          ? '无结果（两个源都没搜到这首歌）'
+          : '搜索失败：两个接口都不可用（' + ((ncmRes.err && ncmRes.err.message) || '') + '）', '#ec4141');
+        return;
+      }
       setStatus('找到 ' + songs.length + ' 首（网易云 ' + ncm.length + ' / QQ ' + qq.length + '），点「点播」发送到房间', '#999');
       songs.forEach(addSongRow);
     }

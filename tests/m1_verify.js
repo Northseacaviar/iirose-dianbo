@@ -60,8 +60,11 @@ function check(name, cond, extra) {
     ['?mid= 形式', 'https://y.qq.com/n/ryqq/songDetail?mid=004dPfPq4VgCmz', '004dPfPq4VgCmz'],
     ['i.y.qq.com playsong songmid=', 'https://i.y.qq.com/v8/playsong.html?songmid=0039MnYb0qxYhV&type=0', '0039MnYb0qxYhV'],
     ['旧版 /n/yqq/song/*.html', 'https://y.qq.com/n/yqq/song/0039MnYb0qxYhV.html', '0039MnYb0qxYhV'],
-    ['裸 mid', '0039MnYb0qxYhV', '0039MnYb0qxYhV'],
+    ['裸 mid（字母数字混合）', '0039MnYb0qxYhV', '0039MnYb0qxYhV'],
     ['普通关键词→null', '青花瓷', null],
+    ['纯数字 14 位 → null（审查 M5：不是 mid）', '12345678901234', null],
+    ['纯字母 14 位 → null（审查 M5）', 'abcdefghijklmn', null],
+    ['是 QQ 链接但无 mid → null', 'https://y.qq.com/n/ryqq/playlist/123456', null],
   ];
   for (const [label, input, want] of links) {
     check('qqExtractMid ' + label, L.qqExtractMid(input) === want, '= ' + L.qqExtractMid(input));
