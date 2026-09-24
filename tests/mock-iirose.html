@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>mock iirose — 点歌插件端到端测试</title></head>
+<body style="background:#111;color:#eee;font:13px/1.6 sans-serif;padding:12px">
+<div id="log">mock iirose 房间：插件加载中…（window.socket.send 被拦截记录）</div>
+
+<script>
+  // 模拟 iirose 房间里插件会用到的全局对象（插件只调用 window.socket.send）
+  window.__SENT__ = [];
+  window.socket = {
+    send: function (msg) {
+      window.__SENT__.push(String(msg));
+      document.getElementById('log').textContent = '已拦截 ' + window.__SENT__.length + ' 条发送消息';
+    },
+  };
+</script>
+<script src="../iirose-dianbo.js"></script>
+</body>
+</html>
