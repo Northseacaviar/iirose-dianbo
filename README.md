@@ -2,6 +2,10 @@
 
 在 iirose（蔷薇花园 / i站）网页里点歌的小脚本。单文件、纯前端、零账号、无混淆，可直接阅读审计。
 
+> **本项目是 vibecoding（AI 结对开发）的产物**
+> - 人类作者（需求、方案拍板、真机验收）：**北海** —— GitHub [@Northseacaviar](https://github.com/Northseacaviar)
+> - AI 助手（读规范、写代码、写测试、发版）：**Corvin Hermes**（基于 [Nous Research 的 Hermes Agent](https://hermes-agent.nousresearch.com/)）
+
 ## 使用（在 iirose 网页里注入即可，无需安装任何扩展）
 
 1. 打开 <https://iirose.com>，登录并进入房间
