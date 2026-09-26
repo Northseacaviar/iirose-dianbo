@@ -1,5 +1,5 @@
 // M1 验收测试 v2：直接提取插件里 #region QQ-LAYER 的真实代码在 Node 里执行（不复制实现）。
-// 覆盖：审查报告指出的 S1 降级链 / S2 时长必需 / S3 官方链接形式，+ 纯函数边界 + 真实接口三类样本。
+// 覆盖：S1 降级链 / S2 时长必需 / S3 官方链接形式，+ 纯函数边界 + 真实接口三类样本。
 // 用法：node m1_verify.js
 const fs = require('fs');
 const path = require('path');
@@ -28,12 +28,12 @@ function check(name, cond, extra) {
 (async () => {
   console.log('=== A. 纯函数边界（离线） ===');
   check('toHttps http→https', L.toHttps('http://ws.stream.qqmusic.qq.com/x.mp3') === 'https://ws.stream.qqmusic.qq.com/x.mp3');
-  check('toHttps 大写 HTTP:// 也改写（审查 M3）', L.toHttps('HTTP://a/b.mp3') === 'https://a/b.mp3', '= ' + L.toHttps('HTTP://a/b.mp3'));
+  check('toHttps 大写 HTTP:// 也改写', L.toHttps('HTTP://a/b.mp3') === 'https://a/b.mp3', '= ' + L.toHttps('HTTP://a/b.mp3'));
   check('toHttps 已是 https 不变', L.toHttps('https://a/b') === 'https://a/b');
   check('toHttps 空值不炸', L.toHttps('') === '' && L.toHttps(null) === '');
   check('parseSize 0.92MB', L.parseSize('0.92MB') === Math.round(0.92 * 1048576), '= ' + L.parseSize('0.92MB'));
   check('parseSize 10.09MB', L.parseSize('10.09MB') === Math.round(10.09 * 1048576), '= ' + L.parseSize('10.09MB'));
-  check('parseSize 单字母单位 10.09M（审查 M2）', L.parseSize('10.09M') === Math.round(10.09 * 1048576), '= ' + L.parseSize('10.09M'));
+  check('parseSize 单字母单位 10.09M', L.parseSize('10.09M') === Math.round(10.09 * 1048576), '= ' + L.parseSize('10.09M'));
   check('parseSize 带空格 0.92 M', L.parseSize('0.92 M') === Math.round(0.92 * 1048576), '= ' + L.parseSize('0.92 M'));
   check('parseSize 千分位 1,234,567', L.parseSize('1,234,567') === 1234567, '= ' + L.parseSize('1,234,567'));
   check('parseSize 负数取绝对值', L.parseSize('-1') === 1);
@@ -44,7 +44,7 @@ function check(name, cond, extra) {
   check('parseInterval 3分', L.parseInterval('3分') === 180);
   check('parseInterval 45秒', L.parseInterval('45秒') === 45);
   check('parseInterval 纯数字', L.parseInterval('269') === 269);
-  check('parseInterval 小时 1小时2分3秒（审查 M1）', L.parseInterval('1小时2分3秒') === 3723, '= ' + L.parseInterval('1小时2分3秒'));
+  check('parseInterval 小时 1小时2分3秒', L.parseInterval('1小时2分3秒') === 3723, '= ' + L.parseInterval('1小时2分3秒'));
   check('parseInterval 冒号 1:02:03', L.parseInterval('1:02:03') === 3723, '= ' + L.parseInterval('1:02:03'));
   check('parseInterval 冒号 60:00', L.parseInterval('60:00') === 3600, '= ' + L.parseInterval('60:00'));
   check('parseKbps 350kbps', L.parseKbps('350kbps') === 350);
@@ -54,7 +54,7 @@ function check(name, cond, extra) {
   check('mapQqSong 脏数据（缺 mid）被过滤', L.mapQqSong({ song: 'x' }) === null);
   check('QQ_TYPE 是 @2', L.QQ_TYPE === '@2');
 
-  console.log('\n=== B. QQ 链接解析（审查 S3：官方各种分享形式） ===');
+  console.log('\n=== B. QQ 链接解析（官方各种分享形式） ===');
   const links = [
     ['新版 songDetail 路径', 'https://y.qq.com/n/ryqq/songDetail/0039MnYb0qxYhV', '0039MnYb0qxYhV'],
     ['?mid= 形式', 'https://y.qq.com/n/ryqq/songDetail?mid=004dPfPq4VgCmz', '004dPfPq4VgCmz'],
@@ -62,15 +62,15 @@ function check(name, cond, extra) {
     ['旧版 /n/yqq/song/*.html', 'https://y.qq.com/n/yqq/song/0039MnYb0qxYhV.html', '0039MnYb0qxYhV'],
     ['裸 mid（字母数字混合）', '0039MnYb0qxYhV', '0039MnYb0qxYhV'],
     ['普通关键词→null', '青花瓷', null],
-    ['纯数字 14 位 → null（审查 M5：不是 mid）', '12345678901234', null],
-    ['纯字母 14 位 → null（审查 M5）', 'abcdefghijklmn', null],
+    ['纯数字 14 位 → null（不是 mid）', '12345678901234', null],
+    ['纯字母 14 位 → null', 'abcdefghijklmn', null],
     ['是 QQ 链接但无 mid → null', 'https://y.qq.com/n/ryqq/playlist/123456', null],
   ];
   for (const [label, input, want] of links) {
     check('qqExtractMid ' + label, L.qqExtractMid(input) === want, '= ' + L.qqExtractMid(input));
   }
 
-  console.log('\n=== C. 完整性判定（审查 S2：时长必需 + 短曲假阳性窗口） ===');
+  console.log('\n=== C. 完整性判定（时长必需 + 短曲假阳性窗口） ===');
   const sizeVip = L.parseSize('0.92MB'), durVip = L.parseInterval('4分29秒');
   check('会员歌(试听 quality + 28kbps) → 不完整', L.isCompleteAudio('音乐试听', sizeVip, durVip, 28) === false,
     `quality=音乐试听 size=${sizeVip} dur=${durVip} kbps=28`);
@@ -78,14 +78,14 @@ function check(name, cond, extra) {
   check('免费歌(完整 HQ) → 完整', L.isCompleteAudio('HQ高音质', sizeFree, durFree, 319) === true, 'kbps=319');
   check('试听但 quality 未标注 → 靠码率拦住', L.isCompleteAudio('', sizeVip, durVip, 28) === false);
   check('短曲(120s)+试听码率 → 拦住（旧比值法此处假阳性）', L.isCompleteAudio('', sizeVip, 120, 28) === false);
-  check('时长未知 → 不敢判完整（审查 S2 核心）', L.isCompleteAudio('', sizeVip, 0, 0) === false);
+  check('时长未知 → 不敢判完整（核心）', L.isCompleteAudio('', sizeVip, 0, 0) === false);
   check('duration=undefined → 不完整', L.isCompleteAudio('', sizeVip, undefined, 0) === false);
   check('码率缺失但比值正常 → 完整', L.isCompleteAudio('', sizeFree, durFree, 0) === true);
   check('码率缺失且比值崩 → 不完整', L.isCompleteAudio('', sizeVip, durVip, 0) === false);
   check('quality 含试听即使 size 大 → 不完整', L.isCompleteAudio('音乐试听', 50 * 1048576, 269, 320) === false);
   check('320k 完整不被误杀', L.isCompleteAudio('无损', Math.round(320 / 8 * 1000 * 300), 300, 0) === true);
 
-  console.log('\n=== D. 降级链（审查 S1：拿到试听不能直接 return） ===');
+  console.log('\n=== D. 降级链（拿到试听不能直接 return） ===');
   const n0 = L.QQ_URL_PROVIDERS.length;
   L.QQ_URL_PROVIDERS.push({
     name: 'mock-完整源',
