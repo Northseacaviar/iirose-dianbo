@@ -50,7 +50,6 @@ QQ 会员歌的完整版需要绿钻账号，纯前端拿不到（官方接口�
   node tests/m1_verify.js
   ```
 - `tests/mock-iirose.html` —— 假 socket 的 iirose 房间，浏览器打开即可端到端驱动真实 UI（需起静态服：`python -m http.server 8790`）
-- 过程产物（可行性报告、立项、审查报告、学习报告）只留本机 `docs/`，不入库
 
 ## 停用
 
