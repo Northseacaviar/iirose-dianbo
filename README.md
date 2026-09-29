@@ -2,12 +2,9 @@
 
 在 iirose（蔷薇花园 / i站）网页里点歌的小脚本。单文件、纯前端、零账号、无混淆，可直接阅读审计。
 
-
-> - 人类作者（需求、方案拍板、真机验收）：**Northseacaviar** —— GitHub [@Northseacaviar](https://github.com/Northseacaviar)
-
+> **作者**：[@Northseacaviar](https://github.com/Northseacaviar)
 
 ## 使用（在 iirose 网页里注入即可，无需安装任何扩展）
-
 1. 打开 <https://iirose.com>，登录并进入房间
 2. 按 `Ctrl+S` 打开内置终端
 3. 输入 `js -s` 回车（打开「自定义 JS」开关，输出 `Custom JS : 1` 即成功）
